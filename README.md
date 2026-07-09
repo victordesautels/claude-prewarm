@@ -129,9 +129,16 @@ The runtime is a thin `bin/claude-prewarm` dispatcher plus libraries under
 bash tests/run.sh
 ```
 
-A dependency-free bash harness (no `bats` required) covering the pure logic:
-time/JSON helpers, validators, weekday parsing, holiday math, usage-limit
-message parsing, config validation, and schedule computation.
+A dependency-free bash harness (no `bats` required), 121 assertions in two parts:
+
+- **Pure logic** — time/JSON helpers, validators, weekday parsing, holiday math,
+  usage-limit message parsing, config validation, schedule computation.
+- **Runtime layer** — `fire.bash` and `launchd.bash` exercised against stub
+  `claude` / `launchctl` / `pmset` / `sudo` / `caffeinate` / `osascript`
+  binaries and a sandbox state dir, so plist generation, the `tick` fire/skip
+  decision, usage-limit back-off, notification gating, and the pmset wake logic
+  are all covered without touching the real system (no real pings, agents,
+  wakes, or notifications).
 
 ## License
 

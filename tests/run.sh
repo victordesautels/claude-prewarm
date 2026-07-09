@@ -22,6 +22,8 @@ ROOT="$(cd "$TESTS_DIR/.." && pwd)"
 . "$ROOT/lib/ui.bash"
 . "$ROOT/lib/time_state.bash"
 . "$ROOT/lib/policy.bash"
+. "$ROOT/lib/launchd.bash"   # runtime layer — exercised (stubbed) at the bottom
+. "$ROOT/lib/fire.bash"      # runtime layer — exercised (stubbed) at the bottom
 COLOR=0   # force plain output regardless of TTY detection in ui.bash
 
 # ---- tiny assert framework --------------------------------------------------
@@ -51,6 +53,14 @@ assert_fail() {
   ( "$@" ) >/dev/null 2>&1
   local rc=$?
   if [ "$rc" -ne 0 ]; then _pass "$name"; else _fail "$name" "expected non-zero, got 0"; fi
+}
+
+# assert_contains NAME HAYSTACK NEEDLE — HAYSTACK must contain NEEDLE
+assert_contains() {
+  case "$2" in
+    *"$3"*) _pass "$1";;
+    *)      _fail "$1" "[$2] does not contain [$3]";;
+  esac
 }
 
 section() { printf '\n== %s ==\n' "$1"; }
@@ -222,6 +232,191 @@ assert_eq "aggressive first line 09:00" "09:00" \
           "$(MODE=aggressive; TIME=09:00; END=17:00; INTERVAL=300; fire_times | head -1)"
 assert_eq "conserve -> single time"      "09:00" \
           "$(MODE=conserve; TIME=09:00; END=17:00; INTERVAL=300; fire_times)"
+
+# ============================================================================
+# RUNTIME LAYER (lib/launchd.bash, lib/fire.bash) — stubbed integration tests
+#
+# These exercise the launchd / pmset / notify / fire logic WITHOUT touching the
+# real system: a sandbox state dir plus stub `claude`, `codex`, `launchctl`,
+# `pmset`, `sudo`, `caffeinate`, and `osascript` binaries prepended to PATH.
+# No real pings, agents, wakes, or notifications are produced. Assertions read
+# the sandbox log, state files, generated plists, and recorded stub calls.
+# ============================================================================
+RT_SANDBOX="$(mktemp -d -t prewarm_rt.XXXXXX)"
+RT_CALLS="$RT_SANDBOX/calls";    mkdir -p "$RT_CALLS"
+RT_STUBSTATE="$RT_SANDBOX/stub"; mkdir -p "$RT_STUBSTATE"
+STUB_BIN="$RT_SANDBOX/bin";      mkdir -p "$STUB_BIN"
+export RT_CALLS RT_STUBSTATE
+
+# runtime globals normally exported by bin/claude-prewarm
+STATE_DIR="$RT_SANDBOX/state";   mkdir -p "$STATE_DIR"
+CONFIG_DIR="$RT_SANDBOX/config"; mkdir -p "$CONFIG_DIR"
+CONFIG="$CONFIG_DIR/config"
+LOG="$STATE_DIR/prewarm.log";    : > "$LOG"
+LAST_FIRE="$STATE_DIR/last_fire"
+LIMIT_UNTIL="$STATE_DIR/limit_until"
+CODEX_LAST_FIRE="$STATE_DIR/codex_last_fire"
+CODEX_LIMIT_UNTIL="$STATE_DIR/codex_limit_until"
+LAST_SKIP="$STATE_DIR/last_skip"
+LAST_RECOVERY="$STATE_DIR/last_recovery"
+WAKE_MARK="$STATE_DIR/wake_set"
+WAKE_AC_WARNED="$STATE_DIR/wake_ac_warned"
+CLAUDE_PROJECTS="$RT_SANDBOX/claude_projects"; mkdir -p "$CLAUDE_PROJECTS"  # empty => no open window
+PLIST="$RT_SANDBOX/agent.plist"
+AWAKE_PLIST="$RT_SANDBOX/awake.plist"
+LABEL="com.claude-prewarm.test"
+AWAKE_LABEL="com.claude-prewarm.test.awake"
+SELF="$STUB_BIN/claude-prewarm"
+TICK_SECONDS=300; GRACE_MIN=8
+
+_mkstub() {  # $1=name  $2=body (single-quoted; $RT_* expand at stub runtime, not now)
+  { printf '#!/usr/bin/env bash\n'; printf '%s\n' "$2"; } > "$STUB_BIN/$1"
+  chmod +x "$STUB_BIN/$1"
+}
+_mkstub claude     'echo "$@" >> "$RT_CALLS/claude"; printf "%s" "${STUB_CLAUDE_OUT:-pong}"; exit "${STUB_CLAUDE_RC:-0}"'
+_mkstub codex      'echo "$@" >> "$RT_CALLS/codex";  printf "%s" "${STUB_CODEX_OUT:-pong}";  exit "${STUB_CODEX_RC:-0}"'
+_mkstub caffeinate 'echo "$@" >> "$RT_CALLS/caffeinate"; exit 0'
+_mkstub osascript  'echo "$@" >> "$RT_CALLS/osascript"; exit 0'
+_mkstub sudo       'echo "$@" >> "$RT_CALLS/sudo"; exec "$@"'
+_mkstub pmset      'echo "$@" >> "$RT_CALLS/pmset"; exit 0'
+_mkstub launchctl  'echo "$@" >> "$RT_CALLS/launchctl"
+case "$1" in
+  bootstrap|load) : > "$RT_STUBSTATE/loaded";;
+  bootout|unload) rm -f "$RT_STUBSTATE/loaded";;
+  print) [ -f "$RT_STUBSTATE/loaded" ] && exit 0 || exit 1;;
+  list)  [ -f "$RT_STUBSTATE/loaded" ] && echo "com.claude-prewarm.test";;
+esac
+exit 0'
+PATH="$STUB_BIN:$PATH"; export PATH
+
+_logtail()    { tail -n1 "$LOG" 2>/dev/null; }
+_reset_fire() { : > "$LOG"; rm -f "$LAST_FIRE" "$LIMIT_UNTIL" "$LAST_SKIP" "$RT_CALLS/claude"; rm -rf "$STATE_DIR/fire.lock"; }
+
+set_valid_config   # baseline valid config (defined in the validate_config section)
+
+# ---- launchd: plist generation ---------------------------------------------
+section "launchd: gen_plist"
+WORKSTART="09:00"; DAYS="weekdays"; MODE="aggressive"
+gen_plist
+PLIST_TXT="$(cat "$PLIST" 2>/dev/null)"
+assert_ok       "gen_plist writes \$PLIST"      test -f "$PLIST"
+assert_contains "plist carries the Label"       "$PLIST_TXT" "<string>$LABEL</string>"
+assert_contains "plist runs the 'tick' verb"    "$PLIST_TXT" "<string>tick</string>"
+assert_contains "plist StartInterval 300"       "$PLIST_TXT" "<integer>300</integer>"
+assert_contains "plist has RunAtLoad"           "$PLIST_TXT" "<key>RunAtLoad</key>"
+
+section "launchd: gen_awake_plist"
+WORKSTART="09:30"; DAYS="weekdays"
+gen_awake_plist
+AWK_TXT="$(cat "$AWAKE_PLIST" 2>/dev/null)"
+assert_contains "awake plist Hour 9"            "$AWK_TXT" "<key>Hour</key><integer>9</integer>"
+assert_contains "awake plist Minute 30"         "$AWK_TXT" "<key>Minute</key><integer>30</integer>"
+assert_eq       "awake plist has 5 weekdays"    5 "$(grep -c '<key>Weekday</key>' "$AWAKE_PLIST")"
+
+# ---- launchd: agent load / unload ------------------------------------------
+section "launchd: reload / unload"
+rm -f "$RT_STUBSTATE/loaded"
+gen_plist
+reload "$LABEL" "$PLIST"
+assert_ok   "reload -> agent_loaded true"        agent_loaded "$LABEL"
+unload_agent "$LABEL" "$PLIST"
+assert_fail "unload_agent -> agent_loaded false" agent_loaded "$LABEL"
+
+section "launchd: apply_agents"
+: > "$AWAKE_PLIST"                       # pretend a stale awake plist exists
+STAYAWAKE="false"; DAYS="weekdays"; WORKSTART="09:00"
+apply_agents
+assert_ok   "writes the main plist"              test -f "$PLIST"
+assert_fail "removes awake plist when STAYAWAKE=false" test -f "$AWAKE_PLIST"
+STAYAWAKE="true"; apply_agents
+assert_ok   "builds awake plist when STAYAWAKE=true"   test -f "$AWAKE_PLIST"
+STAYAWAKE="false"
+
+# ---- launchd: notification gating ------------------------------------------
+# HOME points at the sandbox (no notifier .app there) so notify falls back to
+# the osascript stub — verifying the NOTIFY policy without real notifications.
+section "launchd: notify gating"
+_notify() { ( HOME="$RT_SANDBOX"; NOTIFY="$1"; notify "$2" "Title" "Msg" ); }
+rm -f "$RT_CALLS/osascript"; _notify false   routine
+assert_fail "NOTIFY=false suppresses"            test -s "$RT_CALLS/osascript"
+rm -f "$RT_CALLS/osascript"; _notify delayed routine
+assert_fail "NOTIFY=delayed drops routine"       test -s "$RT_CALLS/osascript"
+rm -f "$RT_CALLS/osascript"; _notify delayed alert
+assert_ok   "NOTIFY=delayed keeps alert"         test -s "$RT_CALLS/osascript"
+rm -f "$RT_CALLS/osascript"; _notify true    routine
+assert_ok   "NOTIFY=true notifies"               test -s "$RT_CALLS/osascript"
+
+# ---- launchd: pmset wake (sudo stubbed) ------------------------------------
+section "launchd: reconcile_wake"
+rm -f "$WAKE_MARK" "$RT_CALLS/pmset"
+( MODE="aggressive"; WAKE="true"; TIME="05:00"; DAYS="weekdays"; reconcile_wake ) >/dev/null 2>&1
+assert_ok       "set_wake writes the wake marker"  test -f "$WAKE_MARK"
+assert_contains "set_wake calls pmset repeat"      "$(cat "$RT_CALLS/pmset" 2>/dev/null)" "repeat"
+( MODE="manual"; reconcile_wake ) >/dev/null 2>&1  # marker present -> clear it
+assert_fail     "manual mode clears the wake marker" test -f "$WAKE_MARK"
+
+# ---- fire: do_fire outcomes -------------------------------------------------
+section "fire: do_fire success"
+_reset_fire
+export STUB_CLAUDE_RC=0 STUB_CLAUDE_OUT="pong"
+( MODE="aggressive"; INTERVAL=300; TIME="$(date +%H:%M)"; END="23:59"; PROMPT="ping"; MODEL=""; NOTIFY="false"; CODEX="false"; do_fire tick )
+assert_ok       "records a positive last_fire"    _is_pos_int "$(read_lf)"
+assert_contains "logs an ok anchor fire"          "$(_logtail)" "ok  anchor"
+assert_contains "invokes claude with -p"          "$(cat "$RT_CALLS/claude" 2>/dev/null)" "-p"
+
+section "fire: do_fire usage-limit backoff"
+_reset_fire
+export STUB_CLAUDE_RC=0 STUB_CLAUDE_OUT="Your usage limit reached; limit will reset 3pm"
+( MODE="aggressive"; INTERVAL=300; TIME="$(date +%H:%M)"; END="23:59"; NOTIFY="false"; do_fire tick )
+assert_ok       "writes a positive limit_until"   _is_pos_int "$(read_limit_until)"
+assert_contains "logs a LIMIT line"               "$(_logtail)" "LIMIT"
+assert_eq       "does NOT advance last_fire"      0 "$(read_lf)"
+
+section "fire: do_fire failure"
+_reset_fire
+export STUB_CLAUDE_RC=7 STUB_CLAUDE_OUT="boom"
+( MODE="aggressive"; INTERVAL=300; TIME="$(date +%H:%M)"; END="23:59"; NOTIFY="false"; do_fire tick )
+assert_contains "logs a FAILED line with rc"      "$(_logtail)" "FAILED  rc=7"
+assert_eq       "does NOT advance last_fire"      0 "$(read_lf)"
+unset STUB_CLAUDE_RC STUB_CLAUDE_OUT
+
+section "fire: do_fire manual inside open window"
+_reset_fire
+RT_NOW="$(date +%s)"; printf '%s' "$RT_NOW" > "$LAST_FIRE"   # our own ping => window open now
+export STUB_CLAUDE_RC=0 STUB_CLAUDE_OUT="pong"
+( MODE="aggressive"; INTERVAL=300; TIME="00:00"; END="23:59"; NOTIFY="false"; do_fire manual )
+assert_contains "logs 'already open'"             "$(_logtail)" "already open"
+assert_eq       "manual fire does not re-anchor"  "$RT_NOW" "$(read_lf)"
+unset STUB_CLAUDE_RC STUB_CLAUDE_OUT
+
+# ---- fire: cmd_tick decision core ------------------------------------------
+section "fire: cmd_tick skips (mode manual)"
+_reset_fire
+( set_valid_config; MODE="manual"; WAKE="false"; cmd_tick )
+assert_contains "logs a SKIP line"                "$(_logtail)" "SKIP"
+assert_fail     "does NOT ping claude"            test -s "$RT_CALLS/claude"
+
+section "fire: cmd_tick fires when due"
+_reset_fire
+export STUB_CLAUDE_RC=0 STUB_CLAUDE_OUT="pong"
+_tick_due() { set_valid_config; MODE="aggressive"; INTERVAL=300; TIME="$(date +%H:%M)"; END="23:59"
+  DAYS="daily"; CALENDAR="none"; SKIP_DATES=""; LOW_BATTERY_SKIP="false"; MIN_REMAINING_MIN="0"
+  WAKE="false"; CODEX="false"; NOTIFY="false"; cmd_tick; }
+assert_ok       "cmd_tick exits 0"                _tick_due   # runs in a subshell; side effects persist
+assert_ok       "cmd_tick fired -> last_fire set" _is_pos_int "$(read_lf)"
+assert_ok       "cmd_tick pinged claude"          test -s "$RT_CALLS/claude"
+assert_contains "cmd_tick logs an ok fire"        "$(_logtail)" "ok"
+unset STUB_CLAUDE_RC STUB_CLAUDE_OUT
+
+# ---- fire: cmd_keepawake ----------------------------------------------------
+section "fire: cmd_keepawake"
+rm -f "$RT_CALLS/caffeinate"
+_keepawake() { set_valid_config; MODE="aggressive"; TIME="00:00"; END="23:59"; DAYS="daily"
+  CALENDAR="none"; SKIP_DATES=""; LOW_BATTERY_SKIP="false"; MIN_REMAINING_MIN="0"; cmd_keepawake; }
+assert_ok       "keepawake execs caffeinate (exit 0)" _keepawake
+assert_contains "runs caffeinate with -t timeout"     "$(cat "$RT_CALLS/caffeinate" 2>/dev/null)" "-t"
+
+rm -rf "$RT_SANDBOX"
 
 # ============================================================================
 # summary
