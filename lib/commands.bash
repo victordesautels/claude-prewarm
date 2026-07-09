@@ -138,16 +138,17 @@ cmd_uninstall() {
   printf '%s %s\n' "$(green "$S_OK")" "Removed launchd agent(s)."
   clear_wake
   if [ "$purge" = 1 ]; then
-    # Remove installed files last. The share dir holds lib/, assets/ and the
-    # notifier app; removing the running script's own file is safe on macOS
-    # (the inode is held open until this process exits). Guard the recursive
-    # deletes so a non-standard CLAUDE_PREWARM_LIB_DIR can't widen the blast radius.
+    # Remove installed files last. Delete the known artifacts explicitly, then
+    # remove the share dir only if that emptied it (rmdir, not rm -rf) — so a
+    # non-standard CLAUDE_PREWARM_LIB_DIR pointing at a shared/populated dir can
+    # never trigger a wide recursive delete. Both CONFIG_DIR and STATE_DIR always
+    # carry a literal suffix, so they are safe to remove recursively. Removing the
+    # running script's own file is fine on macOS (its inode is held open until
+    # this process exits, and the libs are already sourced into memory).
     local share; share="$(dirname "$LIB_DIR")"
     rm -rf "$CONFIG_DIR" "$STATE_DIR"
-    case "$share" in
-      "$HOME"/.local/share/claude-prewarm) rm -rf "$share";;
-      *)                                   rm -rf "$LIB_DIR";;
-    esac
+    rm -rf "$LIB_DIR" "$share/assets" "$share/Claude Prewarm.app"
+    rmdir "$share" 2>/dev/null || true    # removes the share dir iff now empty
     rm -f "$SELF"
     printf '%s %s\n' "$(green "$S_OK")" "Purged all claude-prewarm files."
   else

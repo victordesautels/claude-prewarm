@@ -278,19 +278,31 @@ _mkstub codex      'echo "$@" >> "$RT_CALLS/codex";  printf "%s" "${STUB_CODEX_O
 _mkstub caffeinate 'echo "$@" >> "$RT_CALLS/caffeinate"; exit 0'
 _mkstub osascript  'echo "$@" >> "$RT_CALLS/osascript"; exit 0'
 _mkstub sudo       'echo "$@" >> "$RT_CALLS/sudo"; exec "$@"'
-_mkstub pmset      'echo "$@" >> "$RT_CALLS/pmset"; exit 0'
+# pmset: emits $STUB_PMSET_BATT for `-g batt` so battery_info can be driven.
+_mkstub pmset      'echo "$@" >> "$RT_CALLS/pmset"; if [ "$1" = "-g" ] && [ -n "${STUB_PMSET_BATT:-}" ]; then printf "%s\n" "$STUB_PMSET_BATT"; fi; exit 0'
+# launchctl: tracks a per-LABEL "loaded" marker so different agents stay distinct
+# (a bug that bootout'd the wrong label would then be visible). `print` honors
+# $STUB_NO_PRINT (simulating older macOS without `print`) to force the
+# agent_loaded `list|grep` fallback. The label comes from the gui/UID/LABEL arg,
+# or is read out of the plist for bootstrap/load.
 _mkstub launchctl  'echo "$@" >> "$RT_CALLS/launchctl"
+lbl=""
 case "$1" in
-  bootstrap|load) : > "$RT_STUBSTATE/loaded";;
-  bootout|unload) rm -f "$RT_STUBSTATE/loaded";;
-  print) [ -f "$RT_STUBSTATE/loaded" ] && exit 0 || exit 1;;
-  list)  [ -f "$RT_STUBSTATE/loaded" ] && echo "com.claude-prewarm.test";;
+  bootstrap|load)
+    for a in "$@"; do case "$a" in *.plist) lbl="$(grep -o "<string>[^<]*</string>" "$a" | head -1 | sed -E "s/<[^>]*>//g")";; esac; done
+    [ -n "$lbl" ] && : > "$RT_STUBSTATE/loaded.$lbl";;
+  bootout|unload)
+    for a in "$@"; do case "$a" in gui/*/*) lbl="${a##*/}";; *.plist) lbl="$(grep -o "<string>[^<]*</string>" "$a" | head -1 | sed -E "s/<[^>]*>//g")";; esac; done
+    [ -n "$lbl" ] && rm -f "$RT_STUBSTATE/loaded.$lbl";;
+  print) [ -n "${STUB_NO_PRINT:-}" ] && exit 1; lbl="${2##*/}"; [ -f "$RT_STUBSTATE/loaded.$lbl" ] && exit 0 || exit 1;;
+  list)  for f in "$RT_STUBSTATE"/loaded.*; do [ -e "$f" ] && echo "${f##*/loaded.}"; done;;
 esac
 exit 0'
 PATH="$STUB_BIN:$PATH"; export PATH
 
 _logtail()    { tail -n1 "$LOG" 2>/dev/null; }
 _reset_fire() { : > "$LOG"; rm -f "$LAST_FIRE" "$LIMIT_UNTIL" "$LAST_SKIP" "$RT_CALLS/claude"; rm -rf "$STATE_DIR/fire.lock"; }
+_reset_codex(){ : > "$LOG"; rm -f "$CODEX_LAST_FIRE" "$CODEX_LIMIT_UNTIL" "$RT_CALLS/codex"; rm -rf "$STATE_DIR/codex.fire.lock"; }
 
 set_valid_config   # baseline valid config (defined in the validate_config section)
 
@@ -315,18 +327,29 @@ assert_eq       "awake plist has 5 weekdays"    5 "$(grep -c '<key>Weekday</key>
 
 # ---- launchd: agent load / unload ------------------------------------------
 section "launchd: reload / unload"
-rm -f "$RT_STUBSTATE/loaded"
+rm -f "$RT_STUBSTATE"/loaded.*
 gen_plist
 reload "$LABEL" "$PLIST"
 assert_ok   "reload -> agent_loaded true"        agent_loaded "$LABEL"
 unload_agent "$LABEL" "$PLIST"
 assert_fail "unload_agent -> agent_loaded false" agent_loaded "$LABEL"
 
+# agent_loaded must also work on macOS without `launchctl print` (the list|grep
+# fallback). STUB_NO_PRINT forces print to fail so only the fallback can answer.
+section "launchd: agent_loaded list fallback"
+_al_noprint() { ( export STUB_NO_PRINT=1; agent_loaded "$LABEL" ); }
+rm -f "$RT_STUBSTATE"/loaded.*
+gen_plist; reload "$LABEL" "$PLIST"
+assert_ok   "list fallback finds a loaded agent"  _al_noprint
+unload_agent "$LABEL" "$PLIST"
+assert_fail "list fallback: absent after unload"  _al_noprint
+
 section "launchd: apply_agents"
-: > "$AWAKE_PLIST"                       # pretend a stale awake plist exists
+rm -f "$RT_STUBSTATE"/loaded.* ; : > "$AWAKE_PLIST"   # stale awake plist present
 STAYAWAKE="false"; DAYS="weekdays"; WORKSTART="09:00"
 apply_agents
 assert_ok   "writes the main plist"              test -f "$PLIST"
+assert_ok   "leaves the MAIN agent loaded"       agent_loaded "$LABEL"   # awake unload must not clobber it
 assert_fail "removes awake plist when STAYAWAKE=false" test -f "$AWAKE_PLIST"
 STAYAWAKE="true"; apply_agents
 assert_ok   "builds awake plist when STAYAWAKE=true"   test -f "$AWAKE_PLIST"
@@ -355,39 +378,92 @@ assert_contains "set_wake calls pmset repeat"      "$(cat "$RT_CALLS/pmset" 2>/d
 ( MODE="manual"; reconcile_wake ) >/dev/null 2>&1  # marker present -> clear it
 assert_fail     "manual mode clears the wake marker" test -f "$WAKE_MARK"
 
+# ---- policy: battery_info + check_wake_ac ----------------------------------
+section "policy: battery_info"
+_batt() { ( export STUB_PMSET_BATT="$1"; battery_info ); }
+assert_eq "battery_info reads AC + percent"      "ac|80"      "$(_batt "Now drawing from 'AC Power'; -InternalBattery-0 80%; charged;")"
+assert_eq "battery_info reads battery + percent" "battery|15" "$(_batt "Now drawing from 'Battery Power'; -InternalBattery-0 15%; discharging;")"
+
+# On battery, an outside-active-hours tick must warn that the scheduled wake
+# needs AC. TIME=00:00/END=00:01 keeps 'now' past END for all but the first
+# minute of the day, so the target is always tomorrow's wake.
+section "policy: check_wake_ac warns on battery"
+rm -f "$WAKE_AC_WARNED" "$RT_CALLS/pmset"; : > "$LOG"; : > "$WAKE_MARK"
+( export STUB_PMSET_BATT="Now drawing from 'Battery Power'; -InternalBattery-0 15%; discharging;"
+  WAKE="true"; MODE="aggressive"; DAYS="daily"; CALENDAR="none"; SKIP_DATES=""
+  TIME="00:00"; END="00:01"; NOTIFY="false"; check_wake_ac )
+assert_contains "logs a plug-in warning"          "$(cat "$LOG")" "needs AC power"
+assert_ok       "records the warned target date"  test -s "$WAKE_AC_WARNED"
+
+# ---- time_state: window_anchor from session logs ---------------------------
+section "time_state: window_anchor"
+rm -f "$LAST_FIRE" "$CLAUDE_PROJECTS"/*.jsonl
+assert_eq "no logs + no last-fire -> anchor 0"     0 "$(INTERVAL=300; window_anchor)"
+RECENT_ISO="$(date -u -v-3M '+%Y-%m-%dT%H:%M:%S.000Z')"
+printf '{"timestamp":"%s","type":"user"}\n' "$RECENT_ISO" > "$CLAUDE_PROJECTS/session.jsonl"
+assert_ok "recent session -> window open (anchor>0)" _is_pos_int "$(INTERVAL=300; window_anchor)"
+OLD_ISO="$(date -u -v-6H '+%Y-%m-%dT%H:%M:%S.000Z')"
+printf '{"timestamp":"%s","type":"user"}\n' "$OLD_ISO" > "$CLAUDE_PROJECTS/session.jsonl"
+assert_eq "6h-old session (5h window) -> closed"   0 "$(INTERVAL=300; window_anchor)"
+rm -f "$CLAUDE_PROJECTS"/*.jsonl
+
 # ---- fire: do_fire outcomes -------------------------------------------------
 section "fire: do_fire success"
 _reset_fire
-export STUB_CLAUDE_RC=0 STUB_CLAUDE_OUT="pong"
-( MODE="aggressive"; INTERVAL=300; TIME="$(date +%H:%M)"; END="23:59"; PROMPT="ping"; MODEL=""; NOTIFY="false"; CODEX="false"; do_fire tick )
+( export STUB_CLAUDE_RC=0 STUB_CLAUDE_OUT="pong"
+  MODE="aggressive"; INTERVAL=300; TIME="$(date +%H:%M)"; END="23:59"; PROMPT="ping"; MODEL=""; NOTIFY="false"; CODEX="false"; do_fire tick )
 assert_ok       "records a positive last_fire"    _is_pos_int "$(read_lf)"
 assert_contains "logs an ok anchor fire"          "$(_logtail)" "ok  anchor"
 assert_contains "invokes claude with -p"          "$(cat "$RT_CALLS/claude" 2>/dev/null)" "-p"
 
+# A boundary fire that's overdue (Mac was asleep) must log DELAYED and record
+# recovery. Seed last-fire 1h ago; with INTERVAL=5 the boundary was due ~55m ago.
+section "fire: do_fire delayed recovery"
+_reset_fire; rm -f "$LAST_RECOVERY"
+printf '%s' "$(( $(date +%s) - 3600 ))" > "$LAST_FIRE"
+( export STUB_CLAUDE_RC=0 STUB_CLAUDE_OUT="pong"
+  MODE="aggressive"; INTERVAL=5; TIME="00:00"; END="23:59"; PROMPT="ping"; MODEL=""; NOTIFY="false"; CODEX="false"; do_fire tick )
+assert_contains "logs a DELAYED fire"             "$(_logtail)" "DELAYED due="
+assert_ok       "writes recovery state"           test -s "$LAST_RECOVERY"
+
 section "fire: do_fire usage-limit backoff"
 _reset_fire
-export STUB_CLAUDE_RC=0 STUB_CLAUDE_OUT="Your usage limit reached; limit will reset 3pm"
-( MODE="aggressive"; INTERVAL=300; TIME="$(date +%H:%M)"; END="23:59"; NOTIFY="false"; do_fire tick )
+( export STUB_CLAUDE_RC=0 STUB_CLAUDE_OUT="Your usage limit reached; limit will reset 3pm"
+  MODE="aggressive"; INTERVAL=300; TIME="$(date +%H:%M)"; END="23:59"; NOTIFY="false"; do_fire tick )
 assert_ok       "writes a positive limit_until"   _is_pos_int "$(read_limit_until)"
 assert_contains "logs a LIMIT line"               "$(_logtail)" "LIMIT"
 assert_eq       "does NOT advance last_fire"      0 "$(read_lf)"
 
 section "fire: do_fire failure"
 _reset_fire
-export STUB_CLAUDE_RC=7 STUB_CLAUDE_OUT="boom"
-( MODE="aggressive"; INTERVAL=300; TIME="$(date +%H:%M)"; END="23:59"; NOTIFY="false"; do_fire tick )
+( export STUB_CLAUDE_RC=7 STUB_CLAUDE_OUT="boom"
+  MODE="aggressive"; INTERVAL=300; TIME="$(date +%H:%M)"; END="23:59"; NOTIFY="false"; do_fire tick )
 assert_contains "logs a FAILED line with rc"      "$(_logtail)" "FAILED  rc=7"
 assert_eq       "does NOT advance last_fire"      0 "$(read_lf)"
-unset STUB_CLAUDE_RC STUB_CLAUDE_OUT
 
 section "fire: do_fire manual inside open window"
 _reset_fire
 RT_NOW="$(date +%s)"; printf '%s' "$RT_NOW" > "$LAST_FIRE"   # our own ping => window open now
-export STUB_CLAUDE_RC=0 STUB_CLAUDE_OUT="pong"
-( MODE="aggressive"; INTERVAL=300; TIME="00:00"; END="23:59"; NOTIFY="false"; do_fire manual )
+( export STUB_CLAUDE_RC=0 STUB_CLAUDE_OUT="pong"
+  MODE="aggressive"; INTERVAL=300; TIME="00:00"; END="23:59"; NOTIFY="false"; do_fire manual )
 assert_contains "logs 'already open'"             "$(_logtail)" "already open"
 assert_eq       "manual fire does not re-anchor"  "$RT_NOW" "$(read_lf)"
-unset STUB_CLAUDE_RC STUB_CLAUDE_OUT
+
+# ---- fire: do_codex_fire (opt-in Codex ping) -------------------------------
+section "fire: do_codex_fire success"
+_reset_codex
+( export STUB_CODEX_RC=0 STUB_CODEX_OUT="pong"
+  CODEX="true"; MODE="aggressive"; INTERVAL=300; TIME="00:00"; END="23:59"; CODEX_PROMPT="ping"; CODEX_MODEL=""; NOTIFY="false"; do_codex_fire tick )
+assert_ok       "records a positive codex last_fire" _is_pos_int "$(read_codex_lf)"
+assert_contains "logs a codex fire"                  "$(_logtail)" "codex"
+assert_contains "invokes 'codex exec'"               "$(cat "$RT_CALLS/codex" 2>/dev/null)" "exec"
+
+section "fire: do_codex_fire usage-limit backoff"
+_reset_codex
+( export STUB_CODEX_RC=0 STUB_CODEX_OUT="Your usage limit reached; limit will reset 3pm"
+  CODEX="true"; MODE="aggressive"; INTERVAL=300; TIME="00:00"; END="23:59"; CODEX_PROMPT="ping"; NOTIFY="false"; do_codex_fire tick )
+assert_ok       "writes a positive codex limit_until" _is_pos_int "$(read_codex_limit_until)"
+assert_contains "logs a CODEX LIMIT line"             "$(_logtail)" "CODEX LIMIT"
 
 # ---- fire: cmd_tick decision core ------------------------------------------
 section "fire: cmd_tick skips (mode manual)"
@@ -396,25 +472,31 @@ _reset_fire
 assert_contains "logs a SKIP line"                "$(_logtail)" "SKIP"
 assert_fail     "does NOT ping claude"            test -s "$RT_CALLS/claude"
 
+# TIME=00:00/END=23:59 => 'now' is always within active hours (no wall-clock
+# flake), and with no open window + no prior fire the tick must fire.
 section "fire: cmd_tick fires when due"
 _reset_fire
-export STUB_CLAUDE_RC=0 STUB_CLAUDE_OUT="pong"
-_tick_due() { set_valid_config; MODE="aggressive"; INTERVAL=300; TIME="$(date +%H:%M)"; END="23:59"
+_tick_due() { export STUB_CLAUDE_RC=0 STUB_CLAUDE_OUT="pong"
+  set_valid_config; MODE="aggressive"; INTERVAL=300; TIME="00:00"; END="23:59"
   DAYS="daily"; CALENDAR="none"; SKIP_DATES=""; LOW_BATTERY_SKIP="false"; MIN_REMAINING_MIN="0"
   WAKE="false"; CODEX="false"; NOTIFY="false"; cmd_tick; }
-assert_ok       "cmd_tick exits 0"                _tick_due   # runs in a subshell; side effects persist
+( _tick_due )   # subshell contains cmd_tick's exit 0; file side effects persist
 assert_ok       "cmd_tick fired -> last_fire set" _is_pos_int "$(read_lf)"
 assert_ok       "cmd_tick pinged claude"          test -s "$RT_CALLS/claude"
 assert_contains "cmd_tick logs an ok fire"        "$(_logtail)" "ok"
-unset STUB_CLAUDE_RC STUB_CLAUDE_OUT
 
 # ---- fire: cmd_keepawake ----------------------------------------------------
+# dur = END - now; guard the final minute of the day where dur would be 0.
 section "fire: cmd_keepawake"
 rm -f "$RT_CALLS/caffeinate"
-_keepawake() { set_valid_config; MODE="aggressive"; TIME="00:00"; END="23:59"; DAYS="daily"
-  CALENDAR="none"; SKIP_DATES=""; LOW_BATTERY_SKIP="false"; MIN_REMAINING_MIN="0"; cmd_keepawake; }
-assert_ok       "keepawake execs caffeinate (exit 0)" _keepawake
-assert_contains "runs caffeinate with -t timeout"     "$(cat "$RT_CALLS/caffeinate" 2>/dev/null)" "-t"
+if [ "$(now_min)" -lt 1439 ]; then
+  _keepawake() { set_valid_config; MODE="aggressive"; TIME="00:00"; END="23:59"; DAYS="daily"
+    CALENDAR="none"; SKIP_DATES=""; LOW_BATTERY_SKIP="false"; MIN_REMAINING_MIN="0"; cmd_keepawake; }
+  assert_ok       "keepawake execs caffeinate (exit 0)" _keepawake
+  assert_contains "runs caffeinate with -t timeout"     "$(cat "$RT_CALLS/caffeinate" 2>/dev/null)" "-t"
+else
+  _pass "cmd_keepawake (skipped: final minute of day)"
+fi
 
 rm -rf "$RT_SANDBOX"
 
