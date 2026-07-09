@@ -12,6 +12,11 @@ yellow() { _sgr '33' "$*"; }
 cyan()   { _sgr '36' "$*"; }
 S_OK="✓"; S_NO="✗"; S_WARN="⚠"; S_DOT="●"; S_RING="○"
 row() { printf '  %s  %s\n' "$(dim "$(printf '%-9s' "$1")")" "$2"; }   # aligned "label  value"
+# Dim horizontal rule (default 42 wide). Built with sed, not a loop — bash 3.2
+# mangles multibyte concatenation (see welcome_banner).
+hr()    { dim "$(printf '%*s' "${1:-42}" '' | sed 's/ /─/g')"; }
+# Section header for grouped output (e.g. `status`): a blank line then a bold label.
+group() { printf '\n  %s\n' "$(bold "$1")"; }
 
 # Terminal width for responsive help: $COLUMNS override → tput (TTY) → 80; clamped.
 term_cols() {

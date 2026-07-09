@@ -142,7 +142,7 @@ called — then the full test suite (~2s). Bypass with `git commit --no-verify`.
 bash tests/run.sh
 ```
 
-A dependency-free bash harness (no `bats` required), 137 assertions in two parts:
+A dependency-free bash harness (no `bats` required), 141 assertions in two parts:
 
 - **Pure logic** — time/JSON helpers, validators, weekday parsing, holiday math,
   usage-limit message parsing, config validation, schedule computation.

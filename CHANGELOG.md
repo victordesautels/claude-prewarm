@@ -13,6 +13,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   scripts and non-interactive callers still fall through to help, and it only
   nudges until a config exists.
 
+### Changed
+- The guided setup (`claude-prewarm install`) now opens with a colored welcome
+  banner and a short orientation message (what it does, that nothing is applied
+  until you confirm, and how to cancel). The banner rule is built with `sed`
+  rather than a shell loop to sidestep a bash 3.2 multibyte-concatenation bug
+  that corrupted repeated box-drawing characters.
+- `claude-prewarm status` output is restyled: a framed header with a rule under
+  it and the fields grouped under section headings (Schedule, Ping, Guardrails,
+  Activity) for readability. The `status --json` output is unchanged.
+
 ## [0.4.1-beta] — 2026-07-09
 
 Make the tool relocatable so it can be installed from a package manager

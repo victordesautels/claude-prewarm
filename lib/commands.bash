@@ -224,41 +224,49 @@ cmd_status() {
     return 0
   fi
 
-  printf '%s %s\n' "$(bold claude-prewarm)" "$(dim "v$VERSION")"
+  printf '  %s  %s\n' "$(bold '☀ claude-prewarm')" "$(dim "v$VERSION")"
+  printf '  %s\n' "$(hr 42)"
   # one-glance health line, derived from your real window (your work OR our pings)
   if [ "$loaded" != "yes" ]; then
-    printf '%s %s\n\n' "$(yellow "$S_WARN not installed")" "$(dim "— run: claude-prewarm install")"
+    printf '  %s %s\n' "$(yellow "$S_WARN not installed")" "$(dim "— run: claude-prewarm install")"
   elif [ "$lu" -gt "$nowE" ]; then
-    printf '%s %s\n\n' "$(yellow "$S_WARN limited")" "$(dim "usage limit — prewarms paused until $(date -r "$lu" '+%H:%M')")"
+    printf '  %s %s\n' "$(yellow "$S_WARN limited")" "$(dim "usage limit — prewarms paused until $(date -r "$lu" '+%H:%M')")"
   elif [ "$anchor" -gt 0 ] && [ "$elapsed" -lt "$INTERVAL" ]; then
-    printf '%s %s\n\n' "$(green "$S_DOT active")" "$(dim "window open until $(date -r $((anchor+INTERVAL*60)) '+%H:%M') · $((INTERVAL-elapsed))m left")"
+    printf '  %s %s\n' "$(green "$S_DOT active")" "$(dim "window open until $(date -r $((anchor+INTERVAL*60)) '+%H:%M') · $((INTERVAL-elapsed))m left")"
   elif [ -n "$skip" ]; then
-    printf '%s %s\n\n' "$(dim "$S_RING skipped")" "$(dim "$skip")"
+    printf '  %s %s\n' "$(dim "$S_RING skipped")" "$(dim "$skip")"
   elif { [ "$n" -ge "$(to_min "$TIME")" ] && [ "$n" -le "$(to_min "$END")" ]; } && is_scheduled_today; then
-    printf '%s %s\n\n' "$(green "$S_DOT active")" "$(dim "window due — re-anchors within $((TICK_SECONDS/60))m")"
+    printf '  %s %s\n' "$(green "$S_DOT active")" "$(dim "window due — re-anchors within $((TICK_SECONDS/60))m")"
   else
-    printf '%s %s\n\n' "$(dim "$S_RING idle")" "$(dim "outside active hours (${TIME}-${END}, $DAYS)")"
+    printf '  %s %s\n' "$(dim "$S_RING idle")" "$(dim "outside active hours (${TIME}-${END}, $DAYS)")"
   fi
 
+  group "Schedule"
   row "mode"      "$(mode_label)"
   row "schedule"  "$DAYS · ${TIME}-${END} · cadence $(mode_interval_min)m"
   row "prewarms"  "$(fire_times | tr '\n' ' ') $(dim '(nominal)')"
   row "calendar"  "$CALENDAR$([ -n "$SKIP_DATES" ] && printf ' + custom')"
   [ -n "$skip" ] && row "skip now" "$(yellow "$skip")"
-  if   [ -f "$WAKE_MARK" ];    then row "wake" "$(green "$S_OK") $(cat "$WAKE_MARK")$([ "$bsrc" = "battery" ] && printf ' %s' "$(yellow "$S_WARN on battery — scheduled wakes need AC power")")"
-  elif [ "$WAKE" = "true" ];   then row "wake" "$(yellow "$S_NO not set") $(dim '— run: claude-prewarm config set WAKE true')"
-  else                              row "wake" "$(dim off)"; fi
-  [ "$STAYAWAKE" = "true" ] && row "awake" "caffeinate ${WORKSTART}-${END} $(dim "(loaded=$awake_loaded)")" || row "awake" "$(dim off)"
-  row "notify"    "$NOTIFY"
-  row "guardrail" "battery=$LOW_BATTERY_SKIP ${MIN_BATTERY_PERCENT}% · min remaining ${MIN_REMAINING_MIN}m$([ -n "$bpct" ] && printf ' · now %s%% %s' "$bpct" "$bsrc")"
+
+  group "Ping"
   row "prompt"    "\"$PROMPT\" $(dim "model=${MODEL:-default}")"
   if [ "$CODEX" = "true" ]; then
-    row "codex"    "on $(dim "prompt=\"$CODEX_PROMPT\" model=${CODEX_MODEL:-default}")"
+    row "codex"    "$(green on) $(dim "prompt=\"$CODEX_PROMPT\" model=${CODEX_MODEL:-default}")"
     if [ "$clf" -gt 0 ]; then row "codex last" "$(date -r "$clf" '+%H:%M') $(dim "($(( (nowE-clf)/60 ))m ago, our ping)")"
     else row "codex last" "$(dim never)"; fi
   else
     row "codex"    "$(dim off)"
   fi
+
+  group "Guardrails"
+  if   [ -f "$WAKE_MARK" ];    then row "wake" "$(green "$S_OK") $(cat "$WAKE_MARK")$([ "$bsrc" = "battery" ] && printf ' %s' "$(yellow "$S_WARN on battery — scheduled wakes need AC power")")"
+  elif [ "$WAKE" = "true" ];   then row "wake" "$(yellow "$S_NO not set") $(dim '— run: claude-prewarm config set WAKE true')"
+  else                              row "wake" "$(dim off)"; fi
+  [ "$STAYAWAKE" = "true" ] && row "awake" "caffeinate ${WORKSTART}-${END} $(dim "(loaded=$awake_loaded)")" || row "awake" "$(dim off)"
+  row "notify"    "$NOTIFY"
+  row "battery"   "skip=$LOW_BATTERY_SKIP ${MIN_BATTERY_PERCENT}% · min remaining ${MIN_REMAINING_MIN}m$([ -n "$bpct" ] && printf ' · now %s%% %s' "$bpct" "$bsrc")"
+
+  group "Activity"
   if [ "$lf" -gt 0 ]; then row "last fire" "$(date -r "$lf" '+%H:%M') $(dim "($(( (nowE-lf)/60 ))m ago, our ping)")"
   else row "last fire" "$(dim never)"; fi
   [ "$next_due" -gt 0 ] && row "next due" "$(date -r "$next_due" '+%H:%M')"
@@ -268,6 +276,8 @@ cmd_status() {
   [ -n "$lskip" ] && row "last skip" "$lskip"
   [ "$lu" -gt "$nowE" ] && row "limit" "$(yellow "$S_WARN paused") $(dim "until $(date -r "$lu" '+%H:%M')")"
   [ "$clu" -gt "$nowE" ] && row "codex lim" "$(yellow "$S_WARN paused") $(dim "until $(date -r "$clu" '+%H:%M')")"
+
+  printf '\n'
   command -v ccusage >/dev/null 2>&1 && row "ccusage" "$(dim "installed — run 'ccusage blocks' for live token spend")"
   row "log"       "$(dim "$LOG")"
 }
