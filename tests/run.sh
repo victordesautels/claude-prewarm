@@ -114,9 +114,8 @@ assert_eq "json_bool false" "false" "$(json_bool false)"
 assert_eq "json_bool empty" "false" "$(json_bool '')"
 
 section "mode_interval_min"
-assert_eq "coverage -> 360"           360 "$(MODE=coverage;   mode_interval_min)"
-assert_eq "aggressive INTERVAL=300"   300 "$(MODE=aggressive; INTERVAL=300; mode_interval_min)"
-assert_eq "conserve INTERVAL=250"     250 "$(MODE=conserve;   INTERVAL=250; mode_interval_min)"
+assert_eq "standard INTERVAL=300"   300 "$(MODE=standard; INTERVAL=300; mode_interval_min)"
+assert_eq "daily INTERVAL=250"     250 "$(MODE=daily;   INTERVAL=250; mode_interval_min)"
 
 section "ui: welcome_banner"
 # title="abc"(3) sub="abcdef..."(10) -> w=10, inner=w+6=16, so each rule = 16 "─".
@@ -230,7 +229,7 @@ assert_fail "parse_reset_epoch 'no time here'"   parse_reset_epoch "no time here
 # ============================================================================
 section "validate_config"
 set_valid_config() {
-  TIME="09:00"; WORKSTART="08:00"; END="17:00"; MODE="aggressive"; CALENDAR="none"
+  TIME="09:00"; WORKSTART="08:00"; END="17:00"; MODE="standard"; CALENDAR="none"
   INTERVAL="30"; MIN_BATTERY_PERCENT="20"; MIN_REMAINING_MIN="30"
   KEEPALIVE="true"; CODEX="false"; LOW_BATTERY_SKIP="true"; WAKE="true"
   STAYAWAKE="false"; NOTIFY="true"; CODEX_PROMPT="do work"; DAYS="weekdays"; SKIP_DATES=""
@@ -250,12 +249,12 @@ assert_fail "DAYS with no valid letters"          _cfg_bad DAYS "XYZ"
 # fire_times (lib/policy.bash) — display schedule
 # ============================================================================
 section "fire_times"
-assert_eq "aggressive 09:00-17:00 @300m" "$(printf '09:00\n14:00')" \
-          "$(MODE=aggressive; TIME=09:00; END=17:00; INTERVAL=300; fire_times)"
-assert_eq "aggressive first line 09:00" "09:00" \
-          "$(MODE=aggressive; TIME=09:00; END=17:00; INTERVAL=300; fire_times | head -1)"
-assert_eq "conserve -> single time"      "09:00" \
-          "$(MODE=conserve; TIME=09:00; END=17:00; INTERVAL=300; fire_times)"
+assert_eq "standard 09:00-17:00 @300m" "$(printf '09:00\n14:00')" \
+          "$(MODE=standard; TIME=09:00; END=17:00; INTERVAL=300; fire_times)"
+assert_eq "standard first line 09:00" "09:00" \
+          "$(MODE=standard; TIME=09:00; END=17:00; INTERVAL=300; fire_times | head -1)"
+assert_eq "daily -> single time"      "09:00" \
+          "$(MODE=daily; TIME=09:00; END=17:00; INTERVAL=300; fire_times)"
 
 # ============================================================================
 # RUNTIME LAYER (lib/launchd.bash, lib/fire.bash) — stubbed integration tests
@@ -332,7 +331,7 @@ set_valid_config   # baseline valid config (defined in the validate_config secti
 
 # ---- launchd: plist generation ---------------------------------------------
 section "launchd: gen_plist"
-WORKSTART="09:00"; DAYS="weekdays"; MODE="aggressive"
+WORKSTART="09:00"; DAYS="weekdays"; MODE="standard"
 gen_plist
 PLIST_TXT="$(cat "$PLIST" 2>/dev/null)"
 assert_ok       "gen_plist writes \$PLIST"      test -f "$PLIST"
@@ -396,7 +395,7 @@ assert_ok   "NOTIFY=true notifies"               test -s "$RT_CALLS/osascript"
 # ---- launchd: pmset wake (sudo stubbed) ------------------------------------
 section "launchd: reconcile_wake"
 rm -f "$WAKE_MARK" "$RT_CALLS/pmset"
-( MODE="aggressive"; WAKE="true"; TIME="05:00"; DAYS="weekdays"; reconcile_wake ) >/dev/null 2>&1
+( MODE="standard"; WAKE="true"; TIME="05:00"; DAYS="weekdays"; reconcile_wake ) >/dev/null 2>&1
 assert_ok       "set_wake writes the wake marker"  test -f "$WAKE_MARK"
 assert_contains "set_wake calls pmset repeat"      "$(cat "$RT_CALLS/pmset" 2>/dev/null)" "repeat"
 ( MODE="manual"; reconcile_wake ) >/dev/null 2>&1  # marker present -> clear it
@@ -414,7 +413,7 @@ assert_eq "battery_info reads battery + percent" "battery|15" "$(_batt "Now draw
 section "policy: check_wake_ac warns on battery"
 rm -f "$WAKE_AC_WARNED" "$RT_CALLS/pmset"; : > "$LOG"; : > "$WAKE_MARK"
 ( export STUB_PMSET_BATT="Now drawing from 'Battery Power'; -InternalBattery-0 15%; discharging;"
-  WAKE="true"; MODE="aggressive"; DAYS="daily"; CALENDAR="none"; SKIP_DATES=""
+  WAKE="true"; MODE="standard"; DAYS="daily"; CALENDAR="none"; SKIP_DATES=""
   TIME="00:00"; END="00:01"; NOTIFY="false"; check_wake_ac )
 assert_contains "logs a plug-in warning"          "$(cat "$LOG")" "needs AC power"
 assert_ok       "records the warned target date"  test -s "$WAKE_AC_WARNED"
@@ -435,7 +434,7 @@ rm -f "$CLAUDE_PROJECTS"/*.jsonl
 section "fire: do_fire success"
 _reset_fire
 ( export STUB_CLAUDE_RC=0 STUB_CLAUDE_OUT="pong"
-  MODE="aggressive"; INTERVAL=300; TIME="$(date +%H:%M)"; END="23:59"; PROMPT="ping"; MODEL=""; NOTIFY="false"; CODEX="false"; do_fire tick )
+  MODE="standard"; INTERVAL=300; TIME="$(date +%H:%M)"; END="23:59"; PROMPT="ping"; MODEL=""; NOTIFY="false"; CODEX="false"; do_fire tick )
 assert_ok       "records a positive last_fire"    _is_pos_int "$(read_lf)"
 assert_contains "logs an ok anchor fire"          "$(_logtail)" "ok  anchor"
 assert_contains "invokes claude with -p"          "$(cat "$RT_CALLS/claude" 2>/dev/null)" "-p"
@@ -446,14 +445,14 @@ section "fire: do_fire delayed recovery"
 _reset_fire; rm -f "$LAST_RECOVERY"
 printf '%s' "$(( $(date +%s) - 3600 ))" > "$LAST_FIRE"
 ( export STUB_CLAUDE_RC=0 STUB_CLAUDE_OUT="pong"
-  MODE="aggressive"; INTERVAL=5; TIME="00:00"; END="23:59"; PROMPT="ping"; MODEL=""; NOTIFY="false"; CODEX="false"; do_fire tick )
+  MODE="standard"; INTERVAL=5; TIME="00:00"; END="23:59"; PROMPT="ping"; MODEL=""; NOTIFY="false"; CODEX="false"; do_fire tick )
 assert_contains "logs a DELAYED fire"             "$(_logtail)" "DELAYED due="
 assert_ok       "writes recovery state"           test -s "$LAST_RECOVERY"
 
 section "fire: do_fire usage-limit backoff"
 _reset_fire
 ( export STUB_CLAUDE_RC=0 STUB_CLAUDE_OUT="Your usage limit reached; limit will reset 3pm"
-  MODE="aggressive"; INTERVAL=300; TIME="$(date +%H:%M)"; END="23:59"; NOTIFY="false"; do_fire tick )
+  MODE="standard"; INTERVAL=300; TIME="$(date +%H:%M)"; END="23:59"; NOTIFY="false"; do_fire tick )
 assert_ok       "writes a positive limit_until"   _is_pos_int "$(read_limit_until)"
 assert_contains "logs a LIMIT line"               "$(_logtail)" "LIMIT"
 assert_eq       "does NOT advance last_fire"      0 "$(read_lf)"
@@ -461,7 +460,7 @@ assert_eq       "does NOT advance last_fire"      0 "$(read_lf)"
 section "fire: do_fire failure"
 _reset_fire
 ( export STUB_CLAUDE_RC=7 STUB_CLAUDE_OUT="boom"
-  MODE="aggressive"; INTERVAL=300; TIME="$(date +%H:%M)"; END="23:59"; NOTIFY="false"; do_fire tick )
+  MODE="standard"; INTERVAL=300; TIME="$(date +%H:%M)"; END="23:59"; NOTIFY="false"; do_fire tick )
 assert_contains "logs a FAILED line with rc"      "$(_logtail)" "FAILED  rc=7"
 assert_eq       "does NOT advance last_fire"      0 "$(read_lf)"
 
@@ -469,7 +468,7 @@ section "fire: do_fire manual inside open window"
 _reset_fire
 RT_NOW="$(date +%s)"; printf '%s' "$RT_NOW" > "$LAST_FIRE"   # our own ping => window open now
 ( export STUB_CLAUDE_RC=0 STUB_CLAUDE_OUT="pong"
-  MODE="aggressive"; INTERVAL=300; TIME="00:00"; END="23:59"; NOTIFY="false"; do_fire manual )
+  MODE="standard"; INTERVAL=300; TIME="00:00"; END="23:59"; NOTIFY="false"; do_fire manual )
 assert_contains "logs 'already open'"             "$(_logtail)" "already open"
 assert_eq       "manual fire does not re-anchor"  "$RT_NOW" "$(read_lf)"
 
@@ -477,7 +476,7 @@ assert_eq       "manual fire does not re-anchor"  "$RT_NOW" "$(read_lf)"
 section "fire: do_codex_fire success"
 _reset_codex
 ( export STUB_CODEX_RC=0 STUB_CODEX_OUT="pong"
-  CODEX="true"; MODE="aggressive"; INTERVAL=300; TIME="00:00"; END="23:59"; CODEX_PROMPT="ping"; CODEX_MODEL=""; NOTIFY="false"; do_codex_fire tick )
+  CODEX="true"; MODE="standard"; INTERVAL=300; TIME="00:00"; END="23:59"; CODEX_PROMPT="ping"; CODEX_MODEL=""; NOTIFY="false"; do_codex_fire tick )
 assert_ok       "records a positive codex last_fire" _is_pos_int "$(read_codex_lf)"
 assert_contains "logs a codex fire"                  "$(_logtail)" "codex"
 assert_contains "invokes 'codex exec'"               "$(cat "$RT_CALLS/codex" 2>/dev/null)" "exec"
@@ -485,7 +484,7 @@ assert_contains "invokes 'codex exec'"               "$(cat "$RT_CALLS/codex" 2>
 section "fire: do_codex_fire usage-limit backoff"
 _reset_codex
 ( export STUB_CODEX_RC=0 STUB_CODEX_OUT="Your usage limit reached; limit will reset 3pm"
-  CODEX="true"; MODE="aggressive"; INTERVAL=300; TIME="00:00"; END="23:59"; CODEX_PROMPT="ping"; NOTIFY="false"; do_codex_fire tick )
+  CODEX="true"; MODE="standard"; INTERVAL=300; TIME="00:00"; END="23:59"; CODEX_PROMPT="ping"; NOTIFY="false"; do_codex_fire tick )
 assert_ok       "writes a positive codex limit_until" _is_pos_int "$(read_codex_limit_until)"
 assert_contains "logs a CODEX LIMIT line"             "$(_logtail)" "CODEX LIMIT"
 
@@ -501,7 +500,7 @@ assert_fail     "does NOT ping claude"            test -s "$RT_CALLS/claude"
 section "fire: cmd_tick fires when due"
 _reset_fire
 _tick_due() { export STUB_CLAUDE_RC=0 STUB_CLAUDE_OUT="pong"
-  set_valid_config; MODE="aggressive"; INTERVAL=300; TIME="00:00"; END="23:59"
+  set_valid_config; MODE="standard"; INTERVAL=300; TIME="00:00"; END="23:59"
   DAYS="daily"; CALENDAR="none"; SKIP_DATES=""; LOW_BATTERY_SKIP="false"; MIN_REMAINING_MIN="0"
   WAKE="false"; CODEX="false"; NOTIFY="false"; cmd_tick; }
 ( _tick_due )   # subshell contains cmd_tick's exit 0; file side effects persist
@@ -514,7 +513,7 @@ assert_contains "cmd_tick logs an ok fire"        "$(_logtail)" "ok"
 section "fire: cmd_keepawake"
 rm -f "$RT_CALLS/caffeinate"
 if [ "$(now_min)" -lt 1439 ]; then
-  _keepawake() { set_valid_config; MODE="aggressive"; TIME="00:00"; END="23:59"; DAYS="daily"
+  _keepawake() { set_valid_config; MODE="standard"; TIME="00:00"; END="23:59"; DAYS="daily"
     CALENDAR="none"; SKIP_DATES=""; LOW_BATTERY_SKIP="false"; MIN_REMAINING_MIN="0"; cmd_keepawake; }
   assert_ok       "keepawake execs caffeinate (exit 0)" _keepawake
   assert_contains "runs caffeinate with -t timeout"     "$(cat "$RT_CALLS/caffeinate" 2>/dev/null)" "-t"

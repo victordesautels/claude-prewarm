@@ -30,7 +30,7 @@ cmd_install() {
   apply_flags "$@"; validate_config; save_config; apply_agents
   printf '%s %s %s\n' "$(green "$S_OK")" "$(bold Installed)" "$(dim "— self-healing; checks every $((TICK_SECONDS/60))m")"
   row "days"     "$DAYS"
-  case "$MODE" in aggressive|coverage) KEEPALIVE="true";; conserve|manual) KEEPALIVE="false";; esac
+  case "$MODE" in standard) KEEPALIVE="true";; daily|manual) KEEPALIVE="false";; esac
   row "active"   "${TIME}-${END}  $(dim "mode=$MODE · cadence $(mode_interval_min)m")"
   row "prewarms" "$(fire_times | tr '\n' ' ')"
   row "calendar" "$CALENDAR"
@@ -68,12 +68,12 @@ cmd_setup() {
     if t=$(normalize_hhmm "$t") && [ "$(to_min "$t")" -gt "$(to_min "$TIME")" ]; then END=$t; break; fi
     printf '  %s\n' "$(red "Enter a 24-hour time after $TIME (e.g. 17 or 17:30).")" >&2; done
 
-  menu_select "Prewarm mode?" 0 "Aggressive (tile active windows)" "Coverage (every 6h)" "Conserve (once/day)" "Manual (no automatic pings)" || true
+  menu_select "Prewarm mode?" 0 "Standard (back-to-back 5h windows, no gaps)" "Daily (once per day)" "Manual (no automatic pings)" || true
   [ "$REPLY_IDX" -lt 0 ] && { printf '%s\n' "$(dim cancelled)"; exit 0; }
   case "$REPLY_IDX" in
-    0) MODE=aggressive;; 1) MODE=coverage;; 2) MODE=conserve;; 3) MODE=manual;;
+    0) MODE=standard;; 1) MODE=daily;; 2) MODE=manual;;
   esac
-  case "$MODE" in aggressive|coverage) KEEPALIVE=true;; conserve|manual) KEEPALIVE=false;; esac
+  case "$MODE" in standard) KEEPALIVE=true;; daily|manual) KEEPALIVE=false;; esac
 
   menu_select "Calendar skips?" 1 "None" "US holidays" "Canada holidays" "US + Canada holidays" || true
   [ "$REPLY_IDX" -lt 0 ] && { printf '%s\n' "$(dim cancelled)"; exit 0; }
@@ -355,7 +355,7 @@ usage() {
   trow "--interval MIN"     "Window length in minutes, integer >= 5 (default $INTERVAL)."
   trow "--workstart HH:MM"  "When caffeinate begins keeping the Mac awake (default $WORKSTART)."
   trow "--end HH:MM"        "End of active period; last fire + caffeinate off (default $END)."
-  trow "--mode MODE"        "aggressive | coverage | conserve | manual (default $MODE)."
+  trow "--mode MODE"        "standard | daily | manual (default $MODE)."
   trow "--keepalive B"      "true|false — re-fire at each window boundary (default $KEEPALIVE)."
   trow "--no-keepalive"     "Fire only once per day."
   trow "--notify MODE"      "true (all) | delayed (late/failed only) | false (default $NOTIFY)."
@@ -367,7 +367,7 @@ usage() {
   trow "--model NAME"       "Model override (default: your usual model)."
   trow "--calendar NAME"    "none | us | canada | north-america holiday skips (default $CALENDAR)."
   trow "--skip-dates CSV"   "Additional YYYY-MM-DD dates to skip."
-  trow "--min-battery N"    "Skip scheduled pings on battery below N percent (default $MIN_BATTERY_PERCENT)."
+  trow "--min-battery N"    "Battery threshold for --low-battery-skip (default $MIN_BATTERY_PERCENT)."
   trow "--min-remaining N"  "Skip if fewer than N minutes remain before END (default $MIN_REMAINING_MIN)."
   trow "--low-battery-skip" "Enable low-battery guardrail (default $LOW_BATTERY_SKIP)."
   trow "--no-low-battery-skip" "Disable low-battery guardrail."
@@ -383,7 +383,7 @@ usage() {
 
   printf '\n%s\n' "$(bold EXAMPLES)"
   printf '  %s\n' "$(dim 'claude-prewarm install-default --time 05:00 --workstart 09:00 --end 17:00 --stay-awake')"
-  printf '  %s\n' "$(dim 'claude-prewarm install-default --mode coverage --calendar us')"
+  printf '  %s\n' "$(dim 'claude-prewarm install-default --mode daily --calendar us')"
   printf '  %s\n' "$(dim 'claude-prewarm install-default --codex --codex-prompt ping')"
   printf '  %s\n' "$(dim 'claude-prewarm config set END 18:30')"
   printf '  %s\n' "$(dim 'claude-prewarm config set SKIP_DATES 2026-11-27,2026-12-24')"

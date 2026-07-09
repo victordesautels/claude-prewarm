@@ -61,7 +61,7 @@ DAYS="weekdays"     # weekdays | daily | weekends | custom letters e.g. MWF
 INTERVAL="300"      # window length in minutes (Claude = 300 = 5h); must be >= 5
 WORKSTART="09:00"   # when caffeinate begins keeping the Mac awake
 END="17:00"         # end of active period = last prewarm cutoff AND caffeinate off
-MODE=""             # aggressive | coverage | conserve | manual (empty maps from KEEPALIVE for old configs)
+MODE=""             # standard | daily | manual (empty maps from KEEPALIVE for old configs)
 KEEPALIVE="true"    # true = re-fire at each window boundary; false = only once/day
 PROMPT="ping"       # message sent to anchor the window
 MODEL=""            # optional model override (empty = your default)
@@ -70,7 +70,7 @@ CODEX_PROMPT=""     # empty = follow PROMPT
 CODEX_MODEL=""      # optional Codex model override (empty = your default)
 CALENDAR="none"     # none | us | canada | north-america
 SKIP_DATES=""       # comma-separated YYYY-MM-DD dates for PTO/company shutdowns
-LOW_BATTERY_SKIP="true"
+LOW_BATTERY_SKIP="false" # opt-in: skip scheduled pings when battery is low
 MIN_BATTERY_PERCENT="20"
 MIN_REMAINING_MIN="60"
 WAKE="true"         # wake the Mac before TIME (asks admin once)
@@ -80,8 +80,10 @@ NOTIFY="true"       # true = all fires | delayed = only late/failed | false = no
 mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$HOME/Library/LaunchAgents"
 # shellcheck disable=SC1090
 [ -f "$CONFIG" ] && source "$CONFIG"
-[ -n "${MODE:-}" ] || { [ "$KEEPALIVE" = "true" ] && MODE="aggressive" || MODE="conserve"; }
-case "$MODE" in aggressive|coverage) KEEPALIVE="true";; conserve|manual) KEEPALIVE="false";; esac
+[ -n "${MODE:-}" ] || { [ "$KEEPALIVE" = "true" ] && MODE="standard" || MODE="daily"; }
+# migrate legacy/retired mode names from older configs
+case "$MODE" in aggressive|coverage) MODE="standard";; conserve) MODE="daily";; esac
+case "$MODE" in standard) KEEPALIVE="true";; daily|manual) KEEPALIVE="false";; esac
 CODEX_PROMPT="${CODEX_PROMPT:-$PROMPT}"
 
 # Install location. SHARE_DIR holds libs, assets, and the notifier app; both are

@@ -18,8 +18,8 @@ back-to-back and stay lined up with the hours you actually work.
   detect a window that's already open (from your own work *or* a previous ping)
   and skips redundant pings.
 - **Stays out of the way.** Backs off on usage limits, skips holidays/PTO,
-  skips on low battery or when too little of the workday remains, and notifies
-  you when a fire lands late because the Mac was asleep.
+  skips when too little of the workday remains (and, opt-in, on low battery),
+  and notifies you when a fire lands late because the Mac was asleep.
 - **Optional Codex ping.** Can run a separate `codex exec` keep-warm ping on the
   same cadence (opt-in; Codex does not document Claude-style 5-hour windows).
 
@@ -64,18 +64,20 @@ claude-prewarm --version               Print the version.
 
 ### Modes
 
-| Mode         | Behavior                                             |
-|--------------|------------------------------------------------------|
-| `aggressive` | Tile Claude windows back-to-back during active hours |
-| `coverage`   | One ping every 6 hours while active                  |
-| `conserve`   | A single prewarm per day                             |
-| `manual`     | No scheduled pings (fire only with `now`)            |
+| Mode         | Behavior                                                          |
+|--------------|-------------------------------------------------------------------|
+| `standard` | Back-to-back 5h windows with no gaps, during active hours         |
+| `daily`   | A single prewarm per day                                          |
+| `manual`     | No scheduled pings (fire only with `now`)                         |
+
+None of these keep your Mac awake on their own — that's the separate
+`--stay-awake` (caffeinate) and `--wake` (overnight `pmset`) options.
 
 ### Common examples
 
 ```bash
 claude-prewarm install-default --time 05:00 --workstart 09:00 --end 17:00 --stay-awake
-claude-prewarm install-default --mode coverage --calendar us
+claude-prewarm install-default --mode daily --calendar us
 claude-prewarm config set END 18:30
 claude-prewarm config set SKIP_DATES 2026-11-27,2026-12-24
 claude-prewarm config set CODEX true
@@ -88,7 +90,8 @@ A `launchd` agent runs `claude-prewarm tick` every 5 minutes. Each tick:
 
 1. Validates the on-disk config; bad config logs why and does not fire.
 2. Checks skip conditions — outside active hours, not a scheduled day, holiday
-   or custom skip date, too little time left before `END`, or low battery.
+   or custom skip date, too little time left before `END`, or low battery
+   (if the opt-in low-battery guardrail is enabled).
 3. Backs off if a usage limit was hit (parses the reset time from the limit
    message and pauses until then).
 4. Fires a `claude -p` ping only if no window is currently open **and** the

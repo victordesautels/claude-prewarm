@@ -202,7 +202,7 @@ cmd_tick() {
   else
     # A window is open iff its FIRST message was < INTERVAL ago (your work OR our ping).
     anchor=$(window_anchor)
-    if [ "$MODE" = "conserve" ]; then
+    if [ "$MODE" = "daily" ]; then
       lf=$(read_lf)                              # once/day: fire only if we haven't today
       lf_day=$( [ "$lf" -gt 0 ] && date -r "$lf" '+%Y%m%d' 2>/dev/null || echo 0 )
       { [ "$anchor" -eq 0 ] && [ "$lf_day" != "$today" ]; } && do_fire tick
@@ -220,7 +220,7 @@ cmd_tick() {
     else
       clf=$(read_codex_lf)
       clf_day=$( [ "$clf" -gt 0 ] && date -r "$clf" '+%Y%m%d' 2>/dev/null || echo 0 )
-      if [ "$MODE" = "conserve" ]; then
+      if [ "$MODE" = "daily" ]; then
         [ "$clf_day" != "$today" ] && do_codex_fire tick
       else
         { [ "$clf" -eq 0 ] || [ "$clf_day" != "$today" ] || [ "$nowE" -ge $(( clf + step * 60 )) ]; } && do_codex_fire tick

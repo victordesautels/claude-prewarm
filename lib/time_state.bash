@@ -13,16 +13,12 @@ json_escape() {
 }
 json_bool() { [ "${1:-}" = "true" ] && printf true || printf false; }
 mode_interval_min() {
-  case "$MODE" in
-    coverage) echo 360 ;;
-    *)        echo "$INTERVAL" ;;
-  esac
+  echo "$INTERVAL"
 }
 mode_label() {
   case "$MODE" in
-    conserve)   echo "conserve: one daily prewarm only" ;;
-    coverage)   echo "coverage: every 6h while active" ;;
-    aggressive) echo "aggressive: tile Claude windows during active hours" ;;
+    daily)   echo "daily: one prewarm per day" ;;
+    standard) echo "standard: back-to-back 5h windows, no gaps, during active hours" ;;
     manual)     echo "manual: no scheduled pings" ;;
     *)          echo "$MODE" ;;
   esac
