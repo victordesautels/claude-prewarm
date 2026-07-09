@@ -118,12 +118,19 @@ notify() {  # $1 = routine|alert   $2 = title   $3 = message
   osascript -e "display notification \"$3\" with title \"$2\"" >/dev/null 2>&1 || true
 }
 
+# True if Notification Center already knows the notifier app — i.e. the
+# permission prompt was answered in some previous install. Best-effort: any
+# read failure counts as "not registered" so a genuine first run still prompts.
+notifier_registered() {
+  sqlite3 "$HOME/Library/Group Containers/group.com.apple.usernoted/db2/db" \
+    "select 1 from app where identifier='com.claude-prewarm.notifier' limit 1;" 2>/dev/null | grep -q 1
+}
+
 # First-run notification permission. macOS delivers the permission request AS a
 # notification card, so it is easy to miss (and Do Not Disturb swallows it
 # silently). Fire a test from setup and walk the user through granting it.
-# Runs once (marker file); re-test anytime with: claude-prewarm config test-notify
-# NOTE: the applet is ad-hoc signed — if the bundle is ever rebuilt, macOS may
-# treat it as a new app and drop the granted permission; remove the marker then.
+# Runs once (marker file), and not at all when a previous install already
+# registered the app. Re-test anytime with: claude-prewarm config test-notify
 notifier_setup() {
   [ "$NOTIFY" = "false" ] && return 0
   local applet="$HOME/.local/share/claude-prewarm/Claude Prewarm.app/Contents/MacOS/applet"
@@ -131,6 +138,7 @@ notifier_setup() {
   local mark="$STATE_DIR/notifier_intro"
   [ -f "$mark" ] && return 0
   touch "$mark"
+  notifier_registered && return 0
   CP_TITLE="Claude prewarm" CP_MESSAGE="Notifications are working." "$applet" >/dev/null 2>&1 || true
   echo
   printf '%s\n' "A test notification was just sent."

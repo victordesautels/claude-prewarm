@@ -118,6 +118,17 @@ if command -v osacompile >/dev/null 2>&1; then
     if [ -f "$REPO_ROOT/assets/logo.icns" ]; then
       cp "$REPO_ROOT/assets/logo.icns" "$APP_DEST/Contents/Resources/applet.icns" 2>/dev/null || true
     fi
+    # osacompile ships an Assets.car whose icon (CFBundleIconName=applet)
+    # overrides applet.icns — remove both so the custom icon wins.
+    rm -f "$APP_DEST/Contents/Resources/Assets.car"
+    /usr/libexec/PlistBuddy -c "Delete :CFBundleIconName" "$APP_DEST/Contents/Info.plist" 2>/dev/null || true
+    # Stable identity: notification permission is keyed to the bundle ID, so
+    # it must not change across reinstalls.
+    /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string com.claude-prewarm.notifier" "$APP_DEST/Contents/Info.plist" 2>/dev/null || true
+    /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string Claude Prewarm" "$APP_DEST/Contents/Info.plist" 2>/dev/null || true
+    # The edits above break osacompile's signature seal; re-sign (ad-hoc) or
+    # macOS silently refuses to present the app's notifications.
+    codesign -f -s - "$APP_DEST" 2>/dev/null || true
     # Touch the bundle so Finder / Notification Center refresh the icon cache.
     touch "$APP_DEST" 2>/dev/null || true
     NOTIFIER_OK=1
@@ -133,16 +144,45 @@ fi
 # ---- post-install notes ------------------------------------------------------
 printf '==> Done.\n'
 
-# PATH check: warn if BIN_DIR is not on the current PATH.
+# PATH setup: if BIN_DIR is not on the current PATH, add it to the user's
+# shell profile so the install is one-and-done. Idempotent: skipped when the
+# profile already exports it (e.g. from a previous run).
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *)
-    prof="$HOME/.zshrc"
-    [ -n "${ZSH_VERSION:-}" ] || case "${SHELL:-}" in */bash) prof="$HOME/.bash_profile" ;; esac
-    printf '\n'
-    printf 'NOTE: %s is not on your PATH.\n' "$BIN_DIR"
-    printf '      Add it, e.g. append this line to %s and restart your shell:\n' "$prof"
-    printf '        export PATH="%s:$PATH"\n' "$BIN_DIR"
+    # Prefer a $HOME-relative line so the profile stays portable.
+    case "$BIN_DIR" in
+      "$HOME"/*) path_line='export PATH="$HOME/'"${BIN_DIR#"$HOME"/}"':$PATH"' ;;
+      *)         path_line='export PATH="'"$BIN_DIR"':$PATH"' ;;
+    esac
+    # Pick the profile for the user's login shell. Only bash and zsh are
+    # configured automatically — other shells (fish, tcsh, ...) don't source
+    # these files or use this syntax, so guessing would silently do nothing.
+    prof=""
+    case "${SHELL:-/bin/zsh}" in
+      */bash) prof="$HOME/.bash_profile" ;;
+      */zsh)  prof="${ZDOTDIR:-$HOME}/.zshrc" ;;
+    esac
+    if [ -z "$prof" ]; then
+      printf '\n'
+      printf 'NOTE: %s is not on your PATH, and your login shell (%s)\n' "$BIN_DIR" "${SHELL:-unknown}" >&2
+      printf '      is not one this installer configures automatically. Add the\n' >&2
+      printf '      equivalent of this to your shell startup file:\n' >&2
+      printf '        %s\n' "$path_line" >&2
+      printf '      (fish: fish_add_path %s)\n' "$BIN_DIR" >&2
+    elif [ -f "$prof" ] && grep -qxF "$path_line" "$prof" 2>/dev/null; then
+      : # already configured; takes effect in new shells
+    elif { printf '\n# Added by claude-prewarm install.sh\n%s\n' "$path_line" >>"$prof"; } 2>/dev/null; then
+      printf '\n'
+      printf '==> Added %s to PATH in %s\n' "$BIN_DIR" "$prof"
+      printf '    Takes effect in new shells; for this one, run:\n'
+      printf '      %s\n' "$path_line"
+    else
+      printf '\n'
+      printf 'NOTE: %s is not on your PATH and %s could not be updated.\n' "$BIN_DIR" "$prof" >&2
+      printf '      Add this line to your shell profile and restart your shell:\n' >&2
+      printf '        %s\n' "$path_line" >&2
+    fi
     ;;
 esac
 
