@@ -1,0 +1,14 @@
+# macOS
+.DS_Store
+
+# editor / backup artifacts
+*.bak
+*.swp
+*~
+
+# build output (the notifier .app is compiled by install.sh, not committed)
+/build/
+*.app/
+
+# scratch
+/tmp/

@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- claude-prewarm logo: cream flame + spark on Claude-terracotta.
+       Full-bleed square: macOS 26 applies its own squircle mask; any baked-in
+       rounding/margin makes the system wrap the icon in a backing plate. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#E08A60"/>
+      <stop offset="1" stop-color="#C05A32"/>
+    </linearGradient>
+  </defs>
+
+  <!-- edge-to-edge background -->
+  <rect x="0" y="0" width="1024" height="1024" fill="url(#bg)"/>
+
+  <g transform="translate(512 512) scale(1.18) translate(-512 -512)">
+    <!-- outer flame -->
+    <path fill="#F6F1E7" d="
+      M 540 236
+      C 470 340 452 420 468 512
+      C 434 494 416 452 412 408
+      C 344 470 296 556 296 640
+      C 296 754 388 826 512 826
+      C 636 826 728 752 728 636
+      C 728 500 616 356 540 236
+      Z"/>
+
+    <!-- inner flame cutout -->
+    <path fill="#C86238" d="
+      M 514 566
+      C 466 630 440 668 440 712
+      C 440 762 472 790 512 790
+      C 552 790 584 762 584 712
+      C 584 668 560 630 514 566
+      Z"/>
+
+    <!-- four-point spark (Claude-style star) -->
+    <path fill="#F6F1E7" d="
+      M 704 240
+      C 712 288 724 300 772 308
+      C 724 316 712 328 704 376
+      C 696 328 684 316 636 308
+      C 684 300 696 288 704 240
+      Z"/>
+    <!-- small companion spark -->
+    <path fill="#F6F1E7" opacity="0.85" d="
+      M 770 396
+      C 774 420 780 426 804 430
+      C 780 434 774 440 770 464
+      C 766 440 760 434 736 430
+      C 760 426 766 420 770 396
+      Z"/>
+  </g>
+</svg>

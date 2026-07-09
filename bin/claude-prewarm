@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+#
+# claude-prewarm — keep Claude 5-hour usage windows aligned to your workday.
+#
+# The 5-hour window is anchored to your FIRST message and only re-opens when you
+# send a message AFTER it expires. This tool fires a tiny headless `claude -p`
+# ping so windows tile back-to-back and no time is "wasted" when you happen not
+# to be messaging.
+#
+# Optional Codex support uses `codex exec` as a headless ping on the same cadence.
+# Codex does not expose the same documented 5-hour window behavior, so this is an
+# opt-in keep-warm ping, not Claude-style window anchoring.
+#
+# SELF-HEALING SCHEDULE (v1.3): a single launchd agent "ticks" every 5 minutes.
+# On each tick the script decides whether to fire, based on how long ago the
+# LAST fire was — not a fixed wall-clock table. So the next fire always lands
+# one tick after the current window actually expires, even if a fire happened
+# hours late because the Mac was asleep. No drift, no gaps to the next static
+# slot, and a mid-day install starts prewarming immediately.
+#
+# Three independent times:
+#   TIME       start of the "active" period — earliest a prewarm may fire. A
+#              brief wake (via pmset), then the Mac may fall back asleep.
+#   WORKSTART  when caffeinate starts keeping the Mac awake (midday fires land
+#              on time). Only matters when --stay-awake is on.
+#   END        end of the active period = last prewarm cutoff AND caffeinate off.
+#
+# Notifications distinguish an on-time fire from one that fired late because the
+# Mac had been asleep. Only the optional overnight wake needs admin, and it
+# prompts during `install` — the tool never runs sudo silently.
+#
+set -euo pipefail
+
+VERSION="0.4.0-beta"
+LABEL="com.claude-prewarm"
+AWAKE_LABEL="com.claude-prewarm.awake"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+AWAKE_PLIST="$HOME/Library/LaunchAgents/$AWAKE_LABEL.plist"
+CONFIG_DIR="$HOME/.config/claude-prewarm"
+CONFIG="$CONFIG_DIR/config"
+STATE_DIR="$HOME/.local/state/claude-prewarm"
+LOG="$STATE_DIR/prewarm.log"
+LAST_FIRE="$STATE_DIR/last_fire"       # epoch seconds of the last successful fire
+WAKE_MARK="$STATE_DIR/wake_set"        # present iff WE set a pmset repeat wake
+LIMIT_UNTIL="$STATE_DIR/limit_until"   # epoch to pause firing until (usage limit hit)
+CODEX_LAST_FIRE="$STATE_DIR/codex_last_fire"
+CODEX_LIMIT_UNTIL="$STATE_DIR/codex_limit_until"
+LAST_SKIP="$STATE_DIR/last_skip"
+LAST_RECOVERY="$STATE_DIR/last_recovery"
+WAKE_AC_WARNED="$STATE_DIR/wake_ac_warned"   # target date already warned about (wake needs AC)
+CLAUDE_PROJECTS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"   # Claude Code session logs
+
+TICK_SECONDS=300   # how often the agent checks whether a fire is due (5 min)
+GRACE_MIN=8        # a fire later than this past its due time = "delayed" (> tick)
+
+SELF="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
+
+# ---- defaults (overridden by config, overridden again by CLI flags) ----------
+TIME="05:00"        # earliest a prewarm may fire (brief wake, then Mac may sleep)
+DAYS="weekdays"     # weekdays | daily | weekends | custom letters e.g. MWF
+INTERVAL="300"      # window length in minutes (Claude = 300 = 5h); must be >= 5
+WORKSTART="09:00"   # when caffeinate begins keeping the Mac awake
+END="17:00"         # end of active period = last prewarm cutoff AND caffeinate off
+MODE=""             # aggressive | coverage | conserve | manual (empty maps from KEEPALIVE for old configs)
+KEEPALIVE="true"    # true = re-fire at each window boundary; false = only once/day
+PROMPT="ping"       # message sent to anchor the window
+MODEL=""            # optional model override (empty = your default)
+CODEX="false"       # true = also run a separate Codex headless ping
+CODEX_PROMPT=""     # empty = follow PROMPT
+CODEX_MODEL=""      # optional Codex model override (empty = your default)
+CALENDAR="none"     # none | us | canada | north-america
+SKIP_DATES=""       # comma-separated YYYY-MM-DD dates for PTO/company shutdowns
+LOW_BATTERY_SKIP="true"
+MIN_BATTERY_PERCENT="20"
+MIN_REMAINING_MIN="60"
+WAKE="true"         # wake the Mac before TIME (asks admin once)
+STAYAWAKE="false"   # no-sudo caffeinate: keep Mac awake WORKSTART..END
+NOTIFY="true"       # true = all fires | delayed = only late/failed | false = none
+
+mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$HOME/Library/LaunchAgents"
+# shellcheck disable=SC1090
+[ -f "$CONFIG" ] && source "$CONFIG"
+[ -n "${MODE:-}" ] || { [ "$KEEPALIVE" = "true" ] && MODE="aggressive" || MODE="conserve"; }
+case "$MODE" in aggressive|coverage) KEEPALIVE="true";; conserve|manual) KEEPALIVE="false";; esac
+CODEX_PROMPT="${CODEX_PROMPT:-$PROMPT}"
+
+LIB_DIR="${CLAUDE_PREWARM_LIB_DIR:-$HOME/.local/share/claude-prewarm/lib}"
+for _lib in \
+  ui.bash \
+  time_state.bash \
+  policy.bash \
+  launchd.bash \
+  fire.bash \
+  commands.bash
+ do
+  if [ ! -r "$LIB_DIR/$_lib" ]; then
+    printf 'error: missing claude-prewarm library: %s\n' "$LIB_DIR/$_lib" >&2
+    exit 2
+  fi
+  # shellcheck disable=SC1090
+  . "$LIB_DIR/$_lib"
+done
+unset _lib
+
+# ---- dispatch ----------------------------------------------------------------
+# Global flag: --no-color may appear anywhere; strip it before command routing.
+_rest=()
+for _a in "$@"; do case "$_a" in --no-color) COLOR=0;; *) _rest+=("$_a");; esac; done
+set -- ${_rest[@]+"${_rest[@]}"}
+
+case "${1:-help}" in
+  # `install` is the guided wizard; flags imply the non-interactive path.
+  # `setup`/`wizard` kept as compat aliases.
+  install|setup|wizard) shift
+    if [ $# -gt 0 ]; then cmd_install "$@"; else cmd_setup; fi ;;
+  install-default) shift; cmd_install "$@" ;;
+  uninstall) shift; cmd_uninstall "$@" ;;
+  now)       shift; cmd_now "$@" ;;
+  tick)      shift; cmd_tick "$@" ;;
+  keepawake) shift; cmd_keepawake "$@" ;;
+  status)    shift; cmd_status "$@" ;;
+  config)    shift; cmd_config "$@" ;;
+  logs)      shift; cmd_logs "$@" ;;
+  help|-h|--help) usage ;;
+  version|--version|-V) echo "claude-prewarm v$VERSION" ;;
+  *) die "unknown command: ${1:-}" "run 'claude-prewarm --help' to see available commands" ;;
+esac
