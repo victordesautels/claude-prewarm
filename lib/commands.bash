@@ -243,7 +243,7 @@ cmd_status() {
   row "calendar"  "$CALENDAR$([ -n "$SKIP_DATES" ] && printf ' + custom')"
   [ -n "$skip" ] && row "skip now" "$(yellow "$skip")"
   if   [ -f "$WAKE_MARK" ];    then row "wake" "$(green "$S_OK") $(cat "$WAKE_MARK")$([ "$bsrc" = "battery" ] && printf ' %s' "$(yellow "$S_WARN on battery — scheduled wakes need AC power")")"
-  elif [ "$WAKE" = "true" ];   then row "wake" "$(yellow "$S_NO not set") $(dim '— run: claude-prewarm install')"
+  elif [ "$WAKE" = "true" ];   then row "wake" "$(yellow "$S_NO not set") $(dim '— run: claude-prewarm config set WAKE true')"
   else                              row "wake" "$(dim off)"; fi
   [ "$STAYAWAKE" = "true" ] && row "awake" "caffeinate ${WORKSTART}-${END} $(dim "(loaded=$awake_loaded)")" || row "awake" "$(dim off)"
   row "notify"    "$NOTIFY"
