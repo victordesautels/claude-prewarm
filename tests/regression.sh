@@ -237,6 +237,18 @@ if cli --help | grep -q 'install-default \[flags\]'; then
 else
   fail "help documents install-default"
 fi
+# First-run gate is TTY-guarded: a bare, non-interactive invocation (no config
+# in the sandbox HOME) must fall through to help, never prompt for setup.
+if cli | grep -q 'install-default \[flags\]'; then
+  ok "bare invocation falls back to help when non-interactive"
+else
+  fail "bare invocation falls back to help when non-interactive" "$(cli | head -3)"
+fi
+if cli | grep -q 'Start guided setup now'; then
+  fail "bare invocation must not prompt for setup without a TTY"
+else
+  ok "bare invocation does not prompt for setup without a TTY"
+fi
 cli config test-notify >/dev/null
 if grep -q 'Test notification' "$SB/applet.log" 2>/dev/null; then
   ok "config test-notify sends through the applet even with default config"

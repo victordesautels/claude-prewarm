@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2-beta] — 2026-07-09
+
+### Added
+- First-run onboarding: running a bare `claude-prewarm` in an interactive
+  terminal with no saved config now offers to start the guided setup
+  (`Start guided setup now? [Y/n]`) instead of printing help. TTY-guarded, so
+  scripts and non-interactive callers still fall through to help, and it only
+  nudges until a config exists.
+
 ## [0.4.1-beta] — 2026-07-09
 
 Make the tool relocatable so it can be installed from a package manager
