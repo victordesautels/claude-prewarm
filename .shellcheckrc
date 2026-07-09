@@ -1,0 +1,5 @@
+# shellcheck config for claude-prewarm.
+# Libraries in lib/ are sourced together at runtime, so variables routinely
+# cross file boundaries — SC2034 (unused variable) is all false positives here.
+# Unused *functions* are caught instead by scripts/lint.sh's dead-code check.
+disable=SC2034

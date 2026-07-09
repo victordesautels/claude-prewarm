@@ -57,7 +57,8 @@ ask_yesno() {   # $1=prompt  $2=default(y|n)
 REPLY_IDX=0; REPLY_VAL=""
 menu_select() {   # $1=prompt  $2=default index  rest=options
   local prompt="$1" sel="$2"; shift 2
-  local opts=("$@") n=${#opts[@]} key r1 r2 j cancel=0 stty_saved=""
+  local opts=("$@") key r1 r2 j cancel=0 stty_saved=""
+  local n=${#opts[@]}
   printf '%s %s\n' "$(cyan '?')" "$(bold "$prompt")"
   printf '%s\n' "$(dim '  ↑/↓ move · enter select · esc cancel')"
   _menu_draw() {

@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1-beta] — 2026-07-09
+
+Make the tool relocatable so it can be installed from a package manager
+(Homebrew tap) rather than only a `git clone` + `install.sh`.
+
+### Added
+- `CLAUDE_PREWARM_SHARE_DIR` env override for the support-file root (libs,
+  assets, notifier app), alongside the existing `CLAUDE_PREWARM_LIB_DIR`.
+- `scripts/build-notifier.sh` — the notifier-app build, extracted from
+  `install.sh` so `install.sh` and the Homebrew formula build an identical
+  bundle.
+
+### Fixed
+- The generated launchd agents now forward `CLAUDE_PREWARM_LIB_DIR` /
+  `CLAUDE_PREWARM_SHARE_DIR` into their environment, so the background `tick`
+  (and `keepawake`) resolve their libraries and notifier app when installed
+  outside the default `~/.local/share` location. Previously a non-default
+  install location broke the background agents.
+
 ## [0.4.0-beta] — 2026-07-09
 
 First release with a real source tree and packaging. The runtime is unchanged

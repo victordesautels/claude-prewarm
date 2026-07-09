@@ -110,29 +110,10 @@ cp "$REPO_ROOT"/assets/* "$ASSETS_DEST/"
 # back to a generic osascript notification — so we warn and continue.
 printf '==> Building notifier app\n'
 NOTIFIER_OK=0
-if command -v osacompile >/dev/null 2>&1; then
-  # Remove any prior build so osacompile starts clean (idempotency).
-  rm -rf "$APP_DEST"
-  if osacompile -o "$APP_DEST" "$REPO_ROOT/notifier/notifier.applescript" 2>/dev/null; then
-    # Overlay the claude-prewarm icon, if we shipped one.
-    if [ -f "$REPO_ROOT/assets/logo.icns" ]; then
-      cp "$REPO_ROOT/assets/logo.icns" "$APP_DEST/Contents/Resources/applet.icns" 2>/dev/null || true
-    fi
-    # osacompile ships an Assets.car whose icon (CFBundleIconName=applet)
-    # overrides applet.icns — remove both so the custom icon wins.
-    rm -f "$APP_DEST/Contents/Resources/Assets.car"
-    /usr/libexec/PlistBuddy -c "Delete :CFBundleIconName" "$APP_DEST/Contents/Info.plist" 2>/dev/null || true
-    # Stable identity: notification permission is keyed to the bundle ID, so
-    # it must not change across reinstalls.
-    /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string com.claude-prewarm.notifier" "$APP_DEST/Contents/Info.plist" 2>/dev/null || true
-    /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string Claude Prewarm" "$APP_DEST/Contents/Info.plist" 2>/dev/null || true
-    # The edits above break osacompile's signature seal; re-sign (ad-hoc) or
-    # macOS silently refuses to present the app's notifications.
-    codesign -f -s - "$APP_DEST" 2>/dev/null || true
-    # Touch the bundle so Finder / Notification Center refresh the icon cache.
-    touch "$APP_DEST" 2>/dev/null || true
-    NOTIFIER_OK=1
-  fi
+# Delegated to scripts/build-notifier.sh so install.sh and the Homebrew formula
+# build an identical bundle. Best-effort: a non-zero exit is non-fatal.
+if bash "$REPO_ROOT/scripts/build-notifier.sh" "$REPO_ROOT" "$APP_DEST" 2>/dev/null; then
+  NOTIFIER_OK=1
 fi
 if [ "$NOTIFIER_OK" -eq 1 ]; then
   printf '    Built "%s"\n' "$APP_DEST"

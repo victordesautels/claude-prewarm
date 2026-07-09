@@ -65,6 +65,7 @@ run_notify() {
     set -euo pipefail
     NOTIFY='$mode'
     STATE_DIR=\"\$HOME/.local/state/claude-prewarm\"
+    SHARE_DIR=\"\$HOME/.local/share/claude-prewarm\"
     source '$LIB/ui.bash'
     source '$LIB/launchd.bash'
     $*

@@ -31,7 +31,7 @@
 #
 set -euo pipefail
 
-VERSION="0.4.0-beta"
+VERSION="0.4.1-beta"
 LABEL="com.claude-prewarm"
 AWAKE_LABEL="com.claude-prewarm.awake"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
@@ -84,7 +84,10 @@ mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$HOME/Library/LaunchAgents"
 case "$MODE" in aggressive|coverage) KEEPALIVE="true";; conserve|manual) KEEPALIVE="false";; esac
 CODEX_PROMPT="${CODEX_PROMPT:-$PROMPT}"
 
-LIB_DIR="${CLAUDE_PREWARM_LIB_DIR:-$HOME/.local/share/claude-prewarm/lib}"
+# Install location. SHARE_DIR holds libs, assets, and the notifier app; both are
+# overridable so the tool relocates cleanly (e.g. a Homebrew Cellar prefix).
+SHARE_DIR="${CLAUDE_PREWARM_SHARE_DIR:-$HOME/.local/share/claude-prewarm}"
+LIB_DIR="${CLAUDE_PREWARM_LIB_DIR:-$SHARE_DIR/lib}"
 for _lib in \
   ui.bash \
   time_state.bash \

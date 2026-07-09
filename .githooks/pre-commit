@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# ============================================================================
+# pre-commit — quality gate for claude-prewarm.
+#
+# Runs when any shell file is staged:
+#   1. scripts/lint.sh   syntax (bash -n) + shellcheck + dead-code check
+#   2. tests/run.sh      full unit suite (dependency-free, ~2s)
+#
+# One-time setup after cloning:   git config core.hooksPath .githooks
+# Bypass in an emergency:         git commit --no-verify
+# ============================================================================
+set -uo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT" || exit 1
+
+# Only bother when a shell file (or a check itself) is part of the commit —
+# including deletions (removing a lib file must still run the tests). Match by
+# path/extension first, then shebang-sniff surviving files, mirroring how
+# scripts/lint.sh discovers extensionless scripts like bin/claude-prewarm.
+NEEDS_CHECK=0
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  case "$f" in
+    *.sh|*.bash|bin/*|.githooks/*|.shellcheckrc) NEEDS_CHECK=1; break ;;
+  esac
+  if [ -f "$f" ] && head -n1 "$f" 2>/dev/null | grep -q '^#!.*bash'; then
+    NEEDS_CHECK=1; break
+  fi
+done < <(git diff --cached --name-only --diff-filter=ACDMR)
+[ "$NEEDS_CHECK" = 1 ] || exit 0
+
+# NOTE: checks run against the working tree. If you stage a partial file
+# (git add -p), what is verified may differ from what is committed.
+
+echo "pre-commit: lint"
+./scripts/lint.sh || {
+  echo "pre-commit: lint failed — fix the issues above (or --no-verify to bypass)"
+  exit 1
+}
+
+echo "pre-commit: tests"
+out=$(bash tests/run.sh 2>&1) || {
+  printf '%s\n' "$out" | tail -30
+  echo "pre-commit: tests failed (run: bash tests/run.sh)"
+  exit 1
+}
+printf '%s\n' "$out" | tail -1
+exit 0

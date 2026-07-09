@@ -33,6 +33,10 @@ gen_plist() {
     echo '  <key>EnvironmentVariables</key>'
     echo '  <dict>'
     echo "    <key>PATH</key><string>$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>"
+    # Forward the install location so the background tick finds its libraries and
+    # notifier app wherever the tool was installed (e.g. a Homebrew Cellar prefix).
+    [ -n "${CLAUDE_PREWARM_LIB_DIR:-}" ]   && echo "    <key>CLAUDE_PREWARM_LIB_DIR</key><string>$CLAUDE_PREWARM_LIB_DIR</string>"
+    [ -n "${CLAUDE_PREWARM_SHARE_DIR:-}" ] && echo "    <key>CLAUDE_PREWARM_SHARE_DIR</key><string>$CLAUDE_PREWARM_SHARE_DIR</string>"
     # so the launchd tick reads the same session logs as your interactive Claude Code
     [ -n "${CLAUDE_CONFIG_DIR:-}" ] && echo "    <key>CLAUDE_CONFIG_DIR</key><string>$CLAUDE_CONFIG_DIR</string>"
     echo '  </dict>'
@@ -55,6 +59,13 @@ gen_awake_plist() {
     echo "  <key>Label</key><string>$AWAKE_LABEL</string>"
     echo '  <key>ProgramArguments</key>'
     echo "  <array><string>$SELF</string><string>keepawake</string></array>"
+    # keepawake sources the same libraries, so forward the install location too.
+    echo '  <key>EnvironmentVariables</key>'
+    echo '  <dict>'
+    echo "    <key>PATH</key><string>$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>"
+    [ -n "${CLAUDE_PREWARM_LIB_DIR:-}" ]   && echo "    <key>CLAUDE_PREWARM_LIB_DIR</key><string>$CLAUDE_PREWARM_LIB_DIR</string>"
+    [ -n "${CLAUDE_PREWARM_SHARE_DIR:-}" ] && echo "    <key>CLAUDE_PREWARM_SHARE_DIR</key><string>$CLAUDE_PREWARM_SHARE_DIR</string>"
+    echo '  </dict>'
     echo '  <key>StartCalendarInterval</key><array>'
     for d in $(weekday_nums); do
       echo "    <dict><key>Weekday</key><integer>$d</integer><key>Hour</key><integer>$((10#$h))</integer><key>Minute</key><integer>$((10#$m))</integer></dict>"
@@ -109,7 +120,7 @@ notify() {  # $1 = routine|alert   $2 = title   $3 = message
   esac
   # Prefer the bundled notifier applet so notifications carry the claude-prewarm
   # icon; a bare osascript notification always shows the Script Editor icon.
-  local notifier="$HOME/.local/share/claude-prewarm/Claude Prewarm.app/Contents/MacOS/applet"
+  local notifier="$SHARE_DIR/Claude Prewarm.app/Contents/MacOS/applet"
   if [ -x "$notifier" ]; then
     # env vars, not argv: exec'ing an applet binary directly does not forward
     # CLI arguments to the script's `on run argv`.
@@ -133,7 +144,7 @@ notifier_registered() {
 # registered the app. Re-test anytime with: claude-prewarm config test-notify
 notifier_setup() {
   [ "$NOTIFY" = "false" ] && return 0
-  local applet="$HOME/.local/share/claude-prewarm/Claude Prewarm.app/Contents/MacOS/applet"
+  local applet="$SHARE_DIR/Claude Prewarm.app/Contents/MacOS/applet"
   [ -x "$applet" ] || return 0
   local mark="$STATE_DIR/notifier_intro"
   [ -f "$mark" ] && return 0
