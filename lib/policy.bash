@@ -209,6 +209,14 @@ detect_limit() {   # $1 = ping output (newline-collapsed)
 
 # ---- validation --------------------------------------------------------------
 valid_hhmm() { [[ "$1" =~ ^([01]?[0-9]|2[0-3]):[0-5][0-9]$ ]]; }
+# Lenient 24-hour time for interactive input: 6, 6:30, 06:30 -> zero-padded HH:MM.
+normalize_hhmm() {
+  local t="$1" h m
+  case "$t" in *:*) h=${t%%:*} m=${t#*:};; *) h=$t m=00;; esac
+  [[ "$h" =~ ^[0-9]{1,2}$ && "$m" =~ ^[0-5][0-9]$ ]] || return 1
+  [ "$((10#$h))" -le 23 ] || return 1
+  printf '%02d:%s\n' "$((10#$h))" "$m"
+}
 valid_int()  { [[ "$1" =~ ^[0-9]+$ ]]; }
 valid_bool() { [ "$1" = "true" ] || [ "$1" = "false" ]; }
 valid_skip_dates() {

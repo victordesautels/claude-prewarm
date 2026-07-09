@@ -147,6 +147,18 @@ section "valid_hhmm"
 for v in 09:30 9:30 00:00 23:59; do assert_ok   "accept '$v'" valid_hhmm "$v"; done
 for v in 24:00 12:60 9:5 ab:cd '';  do assert_fail "reject '$v'" valid_hhmm "$v"; done
 
+section "normalize_hhmm"
+assert_eq "6 -> 06:00"        "06:00" "$(normalize_hhmm 6)"
+assert_eq "6:30 -> 06:30"     "06:30" "$(normalize_hhmm 6:30)"
+assert_eq "06:30 unchanged"   "06:30" "$(normalize_hhmm 06:30)"
+assert_eq "17 -> 17:00"       "17:00" "$(normalize_hhmm 17)"
+assert_eq "23:59 unchanged"   "23:59" "$(normalize_hhmm 23:59)"
+assert_eq "0 -> 00:00"        "00:00" "$(normalize_hhmm 0)"
+assert_eq "09 -> 09:00 (not octal)" "09:00" "$(normalize_hhmm 09)"
+for v in 24 24:00 12:60 6:5 6:305 ab:cd 630 ''; do
+  assert_fail "reject '$v'" normalize_hhmm "$v"
+done
+
 section "valid_int"
 for v in 5 0 100; do assert_ok   "accept '$v'" valid_int "$v"; done
 for v in x 1.5 ''; do assert_fail "reject '$v'" valid_int "$v"; done

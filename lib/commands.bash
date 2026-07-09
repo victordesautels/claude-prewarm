@@ -43,16 +43,18 @@ cmd_install() {
 }
 
 cmd_setup() {
+  local t
   { [ -t 0 ] && [ -t 1 ]; } || die "guided install needs an interactive terminal" \
     "use flags instead, e.g.: claude-prewarm install-default --time 05:00 --end 17:00"
   welcome_banner "claude-prewarm   v$VERSION" \
                  "Keep Claude's 5-hour windows aligned to your workday."
   printf '\n%s\n'  "$(yellow '☀') $(bold 'Welcome!') $(dim "Let's set up when your Claude usage windows should open.")"
   printf '%s\n'    "$(dim '  This takes about a minute. Nothing is applied until you confirm at the end.')"
-  printf '%s\n\n'  "$(dim '  ↵ enter accepts each [default] · esc / ctrl-c cancels anytime')"
+  printf '%s\n\n'  "$(dim '  ↵ enter accepts each [default] · ctrl-c cancels anytime (esc cancels in menus)')"
 
-  while :; do TIME=$(ask_text "Morning prewarm time (HH:MM)" "$TIME")
-    valid_hhmm "$TIME" && break; printf '  %s\n' "$(red 'Enter a time as HH:MM.')" >&2; done
+  while :; do t=$(ask_text "Morning prewarm time (24-hour HH:MM)" "$TIME")
+    if t=$(normalize_hhmm "$t"); then TIME=$t; break; fi
+    printf '  %s\n' "$(red 'Enter a 24-hour time like 06:30 (6 and 6:30 work too).')" >&2; done
 
   menu_select "Which days?" 0 "Weekdays (Mon-Fri)" "Every day" "Weekends" "Custom letters…" || true
   [ "$REPLY_IDX" -lt 0 ] && { printf '%s\n' "$(dim cancelled)"; exit 0; }
@@ -62,9 +64,9 @@ cmd_setup() {
          [ -n "$(weekday_nums 2>/dev/null)" ] && break; printf '  %s\n' "$(red 'Use letters M T W R F S U.')" >&2; done;;
   esac
 
-  while :; do END=$(ask_text "End of workday (HH:MM)" "$END")
-    { valid_hhmm "$END" && [ "$(to_min "$END")" -gt "$(to_min "$TIME")" ]; } && break
-    printf '  %s\n' "$(red "Enter HH:MM after $TIME.")" >&2; done
+  while :; do t=$(ask_text "End of workday (24-hour HH:MM)" "$END")
+    if t=$(normalize_hhmm "$t") && [ "$(to_min "$t")" -gt "$(to_min "$TIME")" ]; then END=$t; break; fi
+    printf '  %s\n' "$(red "Enter a 24-hour time after $TIME (e.g. 17 or 17:30).")" >&2; done
 
   menu_select "Prewarm mode?" 0 "Aggressive (tile active windows)" "Coverage (every 6h)" "Conserve (once/day)" "Manual (no automatic pings)" || true
   [ "$REPLY_IDX" -lt 0 ] && { printf '%s\n' "$(dim cancelled)"; exit 0; }
@@ -86,9 +88,9 @@ cmd_setup() {
 
   if ask_yesno "Keep the Mac awake during the workday (no sudo, lid open)?" n; then
     STAYAWAKE=true
-    while :; do WORKSTART=$(ask_text "Workday start — caffeinate begins (HH:MM)" "$WORKSTART")
-      { valid_hhmm "$WORKSTART" && [ "$(to_min "$END")" -gt "$(to_min "$WORKSTART")" ]; } && break
-      printf '  %s\n' "$(red "Enter HH:MM before $END.")" >&2; done
+    while :; do t=$(ask_text "Workday start — caffeinate begins (24-hour HH:MM)" "$WORKSTART")
+      if t=$(normalize_hhmm "$t") && [ "$(to_min "$END")" -gt "$(to_min "$t")" ]; then WORKSTART=$t; break; fi
+      printf '  %s\n' "$(red "Enter a 24-hour time before $END (e.g. 9 or 9:30).")" >&2; done
   else STAYAWAKE=false; fi
 
   ask_yesno "Wake the Mac overnight for the morning prewarm (asks admin once)?" y && WAKE=true || WAKE=false
