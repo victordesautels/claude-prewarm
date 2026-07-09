@@ -118,6 +118,18 @@ assert_eq "coverage -> 360"           360 "$(MODE=coverage;   mode_interval_min)
 assert_eq "aggressive INTERVAL=300"   300 "$(MODE=aggressive; INTERVAL=300; mode_interval_min)"
 assert_eq "conserve INTERVAL=250"     250 "$(MODE=conserve;   INTERVAL=250; mode_interval_min)"
 
+section "ui: welcome_banner"
+# title="abc"(3) sub="abcdef..."(10) -> w=10, inner=w+6=16, so each rule = 16 "─".
+# Guards the bash 3.2 multibyte bug: a loop-built rule corrupts to a 2-byte stub,
+# which would fail both the dash count and the top==bottom border check.
+WB_OUT="$(welcome_banner abc abcdefghij)"
+WB_TOP="$(printf '%s\n' "$WB_OUT" | sed -n '2p')"
+WB_BOT="$(printf '%s\n' "$WB_OUT" | sed -n '5p')"
+assert_eq "welcome_banner top rule = w+6"    16 "$(printf '%s' "$WB_TOP" | grep -o '─' | wc -l | tr -d ' ')"
+assert_eq "welcome_banner bottom rule = w+6" 16 "$(printf '%s' "$WB_BOT" | grep -o '─' | wc -l | tr -d ' ')"
+assert_contains "welcome_banner draws a rounded box top"    "$WB_TOP" "╭"
+assert_contains "welcome_banner draws a rounded box bottom" "$WB_BOT" "╰"
+
 section "read_lf"
 LF_TMP="$(mktemp -t prewarm_lf.XXXXXX)"; rm -f "$LF_TMP"   # ensure missing
 LAST_FIRE="$LF_TMP"

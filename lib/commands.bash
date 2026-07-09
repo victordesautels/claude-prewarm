@@ -45,8 +45,11 @@ cmd_install() {
 cmd_setup() {
   { [ -t 0 ] && [ -t 1 ]; } || die "guided install needs an interactive terminal" \
     "use flags instead, e.g.: claude-prewarm install-default --time 05:00 --end 17:00"
-  printf '%s %s\n' "$(bold 'claude-prewarm install')" "$(dim "v$VERSION")"
-  printf '%s\n\n' "$(dim 'Guided configuration — press enter to accept each [default].')"
+  welcome_banner "claude-prewarm   v$VERSION" \
+                 "Keep Claude's 5-hour windows aligned to your workday."
+  printf '\n%s\n'  "$(yellow '☀') $(bold 'Welcome!') $(dim "Let's set up when your Claude usage windows should open.")"
+  printf '%s\n'    "$(dim '  This takes about a minute. Nothing is applied until you confirm at the end.')"
+  printf '%s\n\n'  "$(dim '  ↵ enter accepts each [default] · esc / ctrl-c cancels anytime')"
 
   while :; do TIME=$(ask_text "Morning prewarm time (HH:MM)" "$TIME")
     valid_hhmm "$TIME" && break; printf '  %s\n' "$(red 'Enter a time as HH:MM.')" >&2; done

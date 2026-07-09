@@ -35,6 +35,24 @@ trow() {
   done
 }
 
+# ---- welcome banner (setup wizard header) ------------------------------------
+# Draws a rounded box around a title + subtitle. Width is measured from the plain
+# ASCII content (color codes are added after, so they don't skew alignment). Box
+# glyphs match the rest of the UI's Unicode set; degrades to plain text sans color.
+# NOTE: the horizontal rule is built with sed, not a shell loop — bash 3.2 mangles
+# multibyte concatenation (appending "─" in a loop corrupts to stray bytes).
+welcome_banner() {   # $1=title  $2=subtitle
+  local title="$1" sub="$2" w tl sl inner bar
+  tl=${#title}; sl=${#sub}; w=$tl; [ "$sl" -gt "$w" ] && w=$sl
+  inner=$(( w + 6 ))
+  bar=$(printf '%*s' "$inner" '' | sed 's/ /─/g')
+  printf '\n'
+  printf '%s\n' "$(cyan "  ╭${bar}╮")"
+  printf '%s%s%s\n' "$(cyan '  │   ')" "$(bold "$(printf '%-*s' "$w" "$title")")"       "$(cyan '   │')"
+  printf '%s%s%s\n' "$(cyan '  │   ')" "$(dim  "$(printf '%-*s' "$w" "$sub")")"          "$(cyan '   │')"
+  printf '%s\n' "$(cyan "  ╰${bar}╯")"
+}
+
 # ---- interactive prompts (used only by the `setup` wizard, TTY-only) ---------
 # Free-text prompt with a default; prompt goes to stderr, the value to stdout.
 ask_text() {   # $1=prompt  $2=default
