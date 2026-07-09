@@ -59,6 +59,7 @@ claude-prewarm status [--json]         Show state, schedule, guardrails, active 
 claude-prewarm config ...              get | set KEY VALUE | edit | path | test-notify.
 claude-prewarm logs [-f|N]             Recent fires (follow with -f, or last N lines).
 claude-prewarm --help                  Full help, all flags, examples.
+claude-prewarm --version               Print the version.
 ```
 
 ### Modes
@@ -123,22 +124,35 @@ The runtime is a thin `bin/claude-prewarm` dispatcher plus libraries under
 | `lib/fire.bash`       | The actual Claude/Codex ping + the `tick` decision    |
 | `lib/commands.bash`   | Subcommands and help text                             |
 
+### Lint & pre-commit hook
+
+```bash
+git config core.hooksPath .githooks   # one-time, after cloning
+./scripts/lint.sh                     # run the checks manually
+```
+
+The pre-commit hook runs `scripts/lint.sh` — syntax check (`bash -n`),
+[shellcheck](https://www.shellcheck.net) (`brew install shellcheck`; skipped
+with a warning if absent), and a dead-code check for functions that are never
+called — then the full test suite (~2s). Bypass with `git commit --no-verify`.
+
 ### Tests
 
 ```bash
 bash tests/run.sh
 ```
 
-A dependency-free bash harness (no `bats` required), 121 assertions in two parts:
+A dependency-free bash harness (no `bats` required), 137 assertions in two parts:
 
 - **Pure logic** — time/JSON helpers, validators, weekday parsing, holiday math,
   usage-limit message parsing, config validation, schedule computation.
 - **Runtime layer** — `fire.bash` and `launchd.bash` exercised against stub
-  `claude` / `launchctl` / `pmset` / `sudo` / `caffeinate` / `osascript`
-  binaries and a sandbox state dir, so plist generation, the `tick` fire/skip
-  decision, usage-limit back-off, notification gating, and the pmset wake logic
-  are all covered without touching the real system (no real pings, agents,
-  wakes, or notifications).
+  `claude` / `codex` / `launchctl` / `pmset` / `sudo` / `caffeinate` /
+  `osascript` binaries and a sandbox state dir, so plist generation, the `tick`
+  fire/skip decision, delayed self-healing recovery, the Codex ping, usage-limit
+  back-off, notification gating, `window_anchor`, and the pmset wake logic are
+  all covered without touching the real system (no real pings, agents, wakes, or
+  notifications).
 
 ## License
 

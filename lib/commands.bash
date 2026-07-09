@@ -331,7 +331,7 @@ usage() {
 
   printf '\n%s\n' "$(bold 'HOW IT WORKS')"
   printf '%s\n' "A launchd agent checks every $((TICK_SECONDS/60)) minutes and fires only when the selected mode says a window is due. It reads Claude Code's local session logs, skips redundant pings when a window is already open, backs off on usage limits, and records late-fire recovery when the Mac was asleep." | fold -s -w $(( cols - 2 )) | sed 's/^/  /'
-  printf '%s\n' "When Codex is enabled, it runs a separate headless 'codex exec --ephemeral --sandbox read-only' ping on the same cadence. Codex has a non-interactive mode, but it is not documented as using Claude-style 5-hour windows, so Codex support is opt-in." | fold -s -w $(( cols - 2 )) | sed 's/^/  /'
+  printf '%s\n' "When Codex is enabled, it runs a separate headless 'codex exec --skip-git-repo-check --ephemeral --sandbox read-only' ping on the same cadence. Codex has a non-interactive mode, but it is not documented as using Claude-style 5-hour windows, so Codex support is opt-in." | fold -s -w $(( cols - 2 )) | sed 's/^/  /'
 
   printf '\n%s %s\n' "$(bold 'INSTALL-DEFAULT FLAGS')" "$(dim '(optional; persisted; validated)')"
   KEYW=20; WRAP=$(( cols - KEYW - 4 )); [ "$WRAP" -lt 24 ] && WRAP=24

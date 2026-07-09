@@ -16,9 +16,13 @@ except for the uninstall improvement below.
   install`).
 - `notifier/notifier.applescript` — source for the notifier app, compiled by
   the installer (previously shipped only as a prebuilt `.app`).
-- `tests/run.sh` — a dependency-free bash test suite for the pure logic
-  (time/JSON helpers, validators, weekday parsing, holiday calendars,
-  usage-limit parsing, config validation, schedule computation).
+- `tests/run.sh` — a dependency-free bash test suite (137 assertions): pure
+  logic (time/JSON helpers, validators, weekday parsing, holiday calendars,
+  usage-limit parsing, config validation, schedule computation) plus a stubbed
+  runtime layer exercising `fire.bash`/`launchd.bash` — plist generation, the
+  tick fire/skip decision, delayed self-healing recovery, the Codex ping,
+  usage-limit back-off, notification gating, `window_anchor`, and pmset wake —
+  without touching the real system.
 - `README.md`, `LICENSE` (MIT), and this changelog.
 - `uninstall --purge`: fully removes the binary, libraries, notifier app,
   config, and logs. Plain `uninstall` still keeps config + logs.
