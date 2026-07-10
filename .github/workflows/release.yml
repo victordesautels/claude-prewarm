@@ -1,0 +1,103 @@
+name: Release and bump tap
+
+# Push to main -> if bin/claude-prewarm's VERSION has no matching git tag yet,
+# tag a release, then rewrite the Homebrew formula in the tap repo to point at
+# that tagged tarball. Plain `brew upgrade` then picks it up. Commits that don't
+# change VERSION are no-ops (the tag already exists).
+
+on:
+  push:
+    branches: [main]
+
+# Only one release at a time; let an in-flight run finish rather than racing.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # create tags + releases in THIS repo
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need existing tags to decide if a release is due
+
+      - name: Read VERSION
+        id: ver
+        run: |
+          v=$(sed -n 's/^VERSION="\(.*\)"/\1/p' bin/claude-prewarm | head -1)
+          if [ -z "$v" ]; then
+            echo "::error::could not parse VERSION from bin/claude-prewarm" && exit 1
+          fi
+          echo "version=$v"  >> "$GITHUB_OUTPUT"
+          echo "tag=v$v"     >> "$GITHUB_OUTPUT"
+
+      - name: Decide whether a release is needed
+        id: check
+        run: |
+          if git rev-parse "refs/tags/${{ steps.ver.outputs.tag }}" >/dev/null 2>&1; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            echo "Tag ${{ steps.ver.outputs.tag }} already exists — nothing to release."
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            echo "New version ${{ steps.ver.outputs.version }} — will release."
+          fi
+
+      - name: Create tag and GitHub release
+        if: steps.check.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.ver.outputs.tag }}" \
+            --title "${{ steps.ver.outputs.tag }}" \
+            --notes "Automated release of ${{ steps.ver.outputs.tag }}. See CHANGELOG.md." \
+            --target "$GITHUB_SHA"
+
+      - name: Compute tarball sha256
+        if: steps.check.outputs.needed == 'true'
+        id: sha
+        run: |
+          url="https://github.com/${{ github.repository }}/archive/refs/tags/${{ steps.ver.outputs.tag }}.tar.gz"
+          # GitHub's generated archive can lag a moment behind tag creation.
+          for i in 1 2 3 4 5 6; do
+            if curl -fsSL "$url" -o /tmp/src.tar.gz; then break; fi
+            echo "archive not ready yet (attempt $i); retrying..." && sleep 5
+          done
+          sum=$(sha256sum /tmp/src.tar.gz | cut -d' ' -f1)
+          echo "sha256=$sum" >> "$GITHUB_OUTPUT"
+          echo "sha256=$sum"
+
+      - name: Checkout tap
+        if: steps.check.outputs.needed == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: victordesautels/homebrew-claude-prewarm
+          token: ${{ secrets.TAP_TOKEN }}
+          path: tap
+
+      - name: Render formula into tap
+        if: steps.check.outputs.needed == 'true'
+        run: |
+          sed -e "s/@@VERSION@@/${{ steps.ver.outputs.version }}/g" \
+              -e "s/@@SHA256@@/${{ steps.sha.outputs.sha256 }}/g" \
+              packaging/claude-prewarm.rb.tmpl > tap/Formula/claude-prewarm.rb
+          echo "----- rendered formula -----"
+          cat tap/Formula/claude-prewarm.rb
+
+      - name: Commit and push tap
+        if: steps.check.outputs.needed == 'true'
+        run: |
+          cd tap
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- Formula/claude-prewarm.rb; then
+            echo "Formula already up to date — nothing to push."
+          else
+            git add Formula/claude-prewarm.rb
+            git commit -m "claude-prewarm ${{ steps.ver.outputs.version }}"
+            git push
+          fi
