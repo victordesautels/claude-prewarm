@@ -100,8 +100,9 @@ A `launchd` agent runs `claude-prewarm tick` every 5 minutes. Each tick:
    until it finishes and is killed if it hangs for 3 minutes.
 
 A tick in the last few minutes before `TIME` waits for `TIME` instead of
-skipping, holding the Mac awake meanwhile. The overnight wake lands a minute
-before `TIME` and macOS would otherwise fall back asleep before the next tick.
+skipping, holding the Mac awake meanwhile, when the tick at `TIME` would fire.
+The overnight wake lands a minute before `TIME` and macOS would otherwise fall
+back asleep before the next tick.
 
 An optional companion agent runs `caffeinate` from `WORKSTART` to `END` (no
 sudo) so midday fires land on time. An optional overnight `pmset` wake (the only

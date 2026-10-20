@@ -192,6 +192,7 @@ cmd_status() {
   lf=$(read_lf); clf=$(read_codex_lf); act=$(last_activity); anchor=$(window_anchor)
   n=$(now_min); nowE=$(date '+%s'); lu=$(read_limit_until); clu=$(read_codex_limit_until)
   fu=$(read_fail_until "$FAIL_BACKOFF"); cfu=$(read_fail_until "$CODEX_FAIL_BACKOFF")
+  [ "$fu" -gt "$nowE" ] || fu=0; [ "$cfu" -gt "$nowE" ] || cfu=0   # a passed retry time is not pending
   next_due=$(next_due_epoch "$lf")
   cnext_due=$(next_due_epoch "$clf")
   [ "$CODEX" = "true" ] || cnext_due=0

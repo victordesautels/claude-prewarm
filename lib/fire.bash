@@ -13,18 +13,25 @@ hold_awake() {
 # instance of the agent while the previous one is still running. Callers send
 # the output to a file, not $(...): a killed ping's orphaned children can hold a
 # pipe open and hang the substitution anyway. rc 124 on timeout.
+# The watchdog's sleeps run in the background so its TERM trap fires at once
+# when the ping ends — a foreground sleep would defer the trap and keep the
+# caller's stdout open. The watchdog flags a timeout in a marker file; elapsed
+# wall time would also count a Mac asleep mid-ping.
 run_with_timeout() {  # $1 = seconds, then the command
-  local secs="$1" pid wd rc start
-  shift; start=$(date +%s)
+  local secs="$1" pid wd rc mark
+  shift
+  mark="$(mktemp "$STATE_DIR/timeout.XXXXXX")"; rm -f "$mark"
   "$@" & pid=$!
-  ( trap 'kill "$s"; exit 0' TERM               # cancelled: take the sleep down too
+  ( s=""; trap '[ -n "$s" ] && kill "$s"; exit 0' TERM
     sleep "$secs" & s=$!; wait "$s"
-    kill -TERM "$pid"; sleep 5; kill -KILL "$pid" ) </dev/null >/dev/null 2>&1 & wd=$!
-  if wait "$pid"; then rc=0; else rc=$?; fi
+    : > "$mark"; kill -TERM "$pid"
+    sleep 5 & s=$!; wait "$s"
+    kill -KILL "$pid" ) </dev/null >/dev/null 2>&1 & wd=$!
+  # 2>/dev/null drops bash's "Terminated: 15" job notice; the ping's own stderr
+  # is already redirected by the caller
+  if wait "$pid" 2>/dev/null; then rc=0; else rc=$?; fi
   kill "$wd" 2>/dev/null || true
-  if [ "$rc" -ne 0 ] && [ $(( $(date +%s) - start )) -ge "$secs" ]; then
-    echo "ping timed out after ${secs}s"; rc=124
-  fi
+  if [ -f "$mark" ]; then echo "ping timed out after ${secs}s"; rc=124; rm -f "$mark"; fi
   return "$rc"
 }
 
@@ -32,22 +39,29 @@ run_with_timeout() {  # $1 = seconds, then the command
 # sleep within seconds (pmset log 2026-10-20: woke 05:59:00, asleep 06:00:27).
 # The tick that runs on that wake was too early to fire, so the morning anchor
 # waited for the lid to open (fired 06:18 and 06:20). Instead, a tick in the
-# last few minutes before TIME holds the Mac awake and waits for TIME.
+# last few minutes before TIME holds the Mac awake and waits for TIME — but only
+# when the tick at TIME would really fire: not on a skip day, during a limit
+# pause or failure back-off, once the cadence has nothing due, or inside a
+# window that is already open.
 wait_for_time() {
-  { [ "$MODE" != "manual" ] && is_scheduled_today; } || return 0
-  holiday_name "$(date +%F)" >/dev/null && return 0
-  local s; s=$(( $(today_epoch "$TIME") - $(date +%s) ))
+  [ "$MODE" = "manual" ] && return 0
+  local t s anchor
+  t=$(today_epoch "$TIME"); s=$(( t - $(date +%s) ))
   { [ "$s" -gt 0 ] && [ "$s" -le "$TICK_SECONDS" ]; } || return 0
+  current_skip_reason "$(to_min "$TIME")" >/dev/null && return 0
+  claude_due "$t" || return 0
+  anchor=$(window_anchor)
+  [ "${anchor:-0}" -gt 0 ] 2>/dev/null && [ $(( anchor + INTERVAL * 60 )) -gt "$t" ] && return 0
   hold_awake
   printf '%s  WAIT    %ss until %s (holding the Mac awake)\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$s" "$TIME" >> "$LOG"
-  sleep "$s"
+  sleep $(( s + 1 ))   # one second past TIME, so the tick reads TIME:00, not TIME-1
 }
 
 # ---- the actual ping ---------------------------------------------------------
 do_fire() {  # $1 = tick | manual
   local mode="${1:-tick}" claude_bin ts nowE win_start win_end out rc tmp
   local lf elapsed today lf_day sched=0 delay=0 delayed=0 kind="" reanchor=1 win_open=0 margs=()
-  local anchor=0 reset_epoch="" step streak retry_at
+  local anchor=0 reset_epoch="" step streak retry_at fails=0 fu
   local lockdir="$STATE_DIR/fire.lock"
 
   # Guard against overlapping fires (e.g. a hung `claude -p`); auto-clear a stale lock.
@@ -81,6 +95,10 @@ do_fire() {  # $1 = tick | manual
     else
       kind="boundary"; sched=$(( lf + step * 60 ))             # previous planned cadence
     fi
+    # A retry after a failed ping was due at its back-off time, not at the slot
+    # that failed — else every recovered failure reads as "Mac was asleep".
+    fu=$(read_fail_until "$FAIL_BACKOFF")
+    if [ "$fu" -gt "$sched" ]; then sched="$fu"; fails=$(read_fail_streak "$FAIL_BACKOFF"); fi
     delay=$(( (nowE - sched) / 60 ))
     [ "$delay" -gt "$GRACE_MIN" ] && delayed=1
   fi
@@ -141,6 +159,9 @@ do_fire() {  # $1 = tick | manual
     record_recovery "claude" "$sched" "$nowE" "$delay" "$(( nowE + step * 60 ))"
     printf '%s  ok  %s DELAYED due=%s +%dm  window~%s-%s\n' "$ts" "$kind" "$due" "$delay" "$win_start" "$win_end" >> "$LOG"
     notify alert "Claude prewarm - delayed" "Due ~$due but Mac was asleep. Fired $win_start. Window $win_start-$win_end."
+  elif [ "$fails" -gt 0 ]; then
+    printf '%s  ok  %s recovered after %d failed  window~%s-%s\n' "$ts" "$kind" "$fails" "$win_start" "$win_end" >> "$LOG"
+    notify alert "Claude prewarm - recovered" "Ping worked after $fails failed. Window $win_start-$win_end."
   else
     printf '%s  ok  %s on-time        window~%s-%s\n' "$ts" "$kind" "$win_start" "$win_end" >> "$LOG"
     notify routine "Claude prewarm" "Window anchored at $win_start (until $win_end)."
@@ -150,7 +171,7 @@ do_fire() {  # $1 = tick | manual
 
 do_codex_fire() {  # $1 = tick | manual
   local mode="${1:-tick}" codex_bin ts nowE ping_start ping_end out rc tmp
-  local lf today lf_day sched=0 delay=0 delayed=0 kind="" reset_epoch="" cargs=() step streak retry_at
+  local lf today lf_day sched=0 delay=0 delayed=0 kind="" reset_epoch="" cargs=() step streak retry_at fails=0 fu
   local lockdir="$STATE_DIR/codex.fire.lock"
 
   [ "$CODEX" = "true" ] || return 0
@@ -181,25 +202,24 @@ do_codex_fire() {  # $1 = tick | manual
     else
       kind="boundary"; sched=$(( lf + step * 60 ))
     fi
+    fu=$(read_fail_until "$CODEX_FAIL_BACKOFF")              # a retry is due at its back-off time
+    if [ "$fu" -gt "$sched" ]; then sched="$fu"; fails=$(read_fail_streak "$CODEX_FAIL_BACKOFF"); fi
     delay=$(( (nowE - sched) / 60 ))
     [ "$delay" -gt "$GRACE_MIN" ] && delayed=1
   fi
 
   ts="$(date '+%Y-%m-%d %H:%M:%S')"
   if [ -z "$codex_bin" ]; then
-    printf '%s  CODEX FAILED  codex binary not found\n' "$ts" >> "$LOG"
-    notify alert "Codex prewarm - FAILED" "codex binary not found."
-    rmdir "$lockdir" 2>/dev/null || true
-    return 0
+    rc=127; out="codex binary not found"      # backs off like any other failure
+  else
+    cargs=(exec --skip-git-repo-check --ephemeral --sandbox read-only)
+    [ -n "$CODEX_MODEL" ] && cargs+=(--model "$CODEX_MODEL")
+    hold_awake
+    tmp="$(mktemp "$STATE_DIR/codex_ping.XXXXXX")"
+    if run_with_timeout "$PING_TIMEOUT" "$codex_bin" "${cargs[@]}" "$CODEX_PROMPT" </dev/null >"$tmp" 2>&1; then rc=0; else rc=$?; fi
+    out="$(cat "$tmp")"; rm -f "$tmp"
+    out="${out//$'\n'/ }"
   fi
-
-  cargs=(exec --skip-git-repo-check --ephemeral --sandbox read-only)
-  [ -n "$CODEX_MODEL" ] && cargs+=(--model "$CODEX_MODEL")
-  hold_awake
-  tmp="$(mktemp "$STATE_DIR/codex_ping.XXXXXX")"
-  if run_with_timeout "$PING_TIMEOUT" "$codex_bin" "${cargs[@]}" "$CODEX_PROMPT" </dev/null >"$tmp" 2>&1; then rc=0; else rc=$?; fi
-  out="$(cat "$tmp")"; rm -f "$tmp"
-  out="${out//$'\n'/ }"
 
   if reset_epoch="$(detect_limit "$out")"; then
     local resume until_txt fmt='+%H:%M'
@@ -237,6 +257,9 @@ do_codex_fire() {  # $1 = tick | manual
     record_recovery "codex" "$sched" "$nowE" "$delay" "$(( nowE + step * 60 ))"
     printf '%s  ok  codex %s DELAYED due=%s +%dm  ping~%s-%s\n' "$ts" "$kind" "$due" "$delay" "$ping_start" "$ping_end" >> "$LOG"
     notify alert "Codex prewarm - delayed" "Due ~$due but Mac was asleep. Fired $ping_start."
+  elif [ "$fails" -gt 0 ]; then
+    printf '%s  ok  codex %s recovered after %d failed  ping~%s-%s\n' "$ts" "$kind" "$fails" "$ping_start" "$ping_end" >> "$LOG"
+    notify alert "Codex prewarm - recovered" "Codex ping worked after $fails failed."
   else
     printf '%s  ok  codex %s on-time      ping~%s-%s\n' "$ts" "$kind" "$ping_start" "$ping_end" >> "$LOG"
     notify routine "Codex prewarm" "Codex ping sent at $ping_start."
@@ -251,7 +274,7 @@ cmd_tick() {
   ( validate_config ) 2>>"$LOG" || exit 0    # bad on-disk config → log why, don't fire
   check_wake_ac                              # before the skip exit: evening/overnight ticks land here
   wait_for_time                              # a tick just before TIME waits for it instead of skipping
-  local n nowE lu fu clu cfu anchor today lf lf_day clf clf_day skip step due=0
+  local n nowE lu fu clu cfu anchor today clf clf_day skip step
   n=$(now_min); nowE=$(date '+%s')
   today=$(date '+%Y%m%d')
   step=$(mode_interval_min)
@@ -265,21 +288,12 @@ cmd_tick() {
     record_skip_once "claude" "usage limit until $(date -r "$lu" '+%H:%M')"
   elif [ "$fu" -gt "$nowE" ]; then
     record_skip_once "claude" "retrying failed ping at $(date -r "$fu" '+%H:%M')"
-  else
-    lf=$(read_lf)
-    lf_day=$( [ "$lf" -gt 0 ] && date -r "$lf" '+%Y%m%d' 2>/dev/null || echo 0 )
-    if [ "$MODE" = "daily" ]; then
-      [ "$lf_day" != "$today" ] && due=1         # once/day: fire only if we haven't today
-    else
-      { [ "$lf" -eq 0 ] || [ "$lf_day" != "$today" ] || [ "$nowE" -ge $(( lf + step * 60 )) ]; } && due=1
-    fi
+  elif claude_due "$nowE"; then
     # Cadence first: window_anchor greps a day of session logs, so only look for
     # an open window (its FIRST message < INTERVAL ago, your work OR our ping)
     # once a fire is due.
-    if [ "$due" -eq 1 ]; then
-      anchor=$(window_anchor)
-      [ "${anchor:-0}" -gt 0 ] 2>/dev/null || do_fire tick
-    fi
+    anchor=$(window_anchor)
+    [ "${anchor:-0}" -gt 0 ] 2>/dev/null || do_fire tick
   fi
 
   if [ "$CODEX" = "true" ]; then

@@ -257,6 +257,40 @@ else
 fi
 rm -rf "$SB"
 
+# ---- tick end to end: the real entrypoint under set -euo pipefail -------------
+# tests/run.sh sources the libs without errexit; this drives bin/claude-prewarm
+# itself, so a failing `a && b` or pipefail slip would abort here. Stub claude
+# fails while $SB/fail exists; stub caffeinate/pmset keep the real ones out.
+
+sandbox
+mkdir -p "$SB/.config/claude-prewarm"
+printf 'TIME=00:00\nEND=23:59\nDAYS=daily\nMODE=standard\nMIN_REMAINING_MIN=0\nWAKE=false\nLOW_BATTERY_SKIP=false\nCALENDAR=none\n' \
+  > "$SB/.config/claude-prewarm/config"
+cat > "$SB/bin/claude" <<EOF
+#!/bin/bash
+echo x >> "$SB/claude.calls"
+[ -f "$SB/fail" ] && { echo "Failed to authenticate"; exit 1; }
+echo pong
+EOF
+printf '#!/bin/bash\nexit 0\n' > "$SB/bin/caffeinate"; printf '#!/bin/bash\nexit 0\n' > "$SB/bin/pmset"
+chmod +x "$SB/bin/claude" "$SB/bin/caffeinate" "$SB/bin/pmset"
+ST="$SB/.local/state/claude-prewarm"
+tick() { HOME="$SB" PATH="$SB/bin:$PATH" CLAUDE_PREWARM_LIB_DIR="$LIB" bash "$BIN" tick </dev/null >/dev/null 2>&1; }
+calls() { wc -l < "$SB/claude.calls" 2>/dev/null | tr -d ' ' || echo 0; }
+last() { tail -n1 "$ST/prewarm.log" 2>/dev/null; }
+
+tick && case "$(last)" in *"ok  anchor"*) ok "e2e: first tick fires";; *) fail "e2e: first tick fires" "$(last)";; esac
+tick && [ "$(calls)" = 1 ] && ok "e2e: window open -> no second ping" || fail "e2e: window open -> no second ping" "calls=$(calls)"
+rm -f "$ST/last_fire" "$ST/fire_history"; : > "$SB/fail"
+tick && case "$(last)" in *"FAILED  rc=1  retry"*) ok "e2e: failure backs off";; *) fail "e2e: failure backs off" "$(last)";; esac
+grep -q 'FAILED' "$SB/applet.log" 2>/dev/null && ok "e2e: first failure notifies" || fail "e2e: first failure notifies"
+tick && [ "$(calls)" = 2 ] && ok "e2e: back-off -> no retry yet" || fail "e2e: back-off -> no retry yet" "calls=$(calls) $(last)"
+now=$(date +%s); printf '1|%s|%s\n' "$(( now - 60 ))" "$(( now - 960 ))" > "$ST/fail_backoff"; rm -f "$SB/fail"
+tick && case "$(last)" in *"recovered after 1 failed"*) ok "e2e: retry reads as recovered";; *) fail "e2e: retry reads as recovered" "$(last)";; esac
+json="$(HOME="$SB" PATH="$SB/bin:$PATH" CLAUDE_PREWARM_LIB_DIR="$LIB" bash "$BIN" status --json 2>&1)"
+case "$json" in *'"retry_at":null'*) ok "e2e: status --json clears retry_at";; *) fail "e2e: status --json clears retry_at" "$json";; esac
+rm -rf "$SB"
+
 # ---- notifier source: env-first, UTF-8-safe ------------------------------------
 
 src="$ROOT/notifier/notifier.applescript"

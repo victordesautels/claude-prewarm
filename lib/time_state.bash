@@ -101,9 +101,16 @@ read_codex_limit_until() {
   [[ "$v" =~ ^[0-9]+$ ]] || v=0
   echo "$v"
 }
+# Failure back-off file: "streak|retry_epoch|last_failure_epoch" (record_failure).
 read_fail_until() {   # $1 = backoff file; epoch to hold retries until after a failed ping; 0 if none/corrupt
-  local n v=0
-  [ -f "$1" ] && IFS='|' read -r n v < "$1" 2>/dev/null || true
+  local n v=0 rest
+  [ -f "$1" ] && IFS='|' read -r n v rest < "$1" 2>/dev/null || true
   [[ "$v" =~ ^[0-9]+$ ]] || v=0
   echo "$v"
+}
+read_fail_streak() {  # $1 = backoff file; consecutive failed pings; 0 if none/corrupt
+  local n=0 rest
+  [ -f "$1" ] && IFS='|' read -r n rest < "$1" 2>/dev/null || true
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  echo "$n"
 }

@@ -4,6 +4,32 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.4-beta] — 2026-10-20
+
+### Fixed
+- A ping that works on retry after a failure is logged and notified as
+  "recovered after N failed". It used to read as "Mac was asleep", because
+  lateness was measured from the slot that failed, not the retry time.
+- "codex binary not found" backs off like any other failure. It used to alert
+  on every tick.
+- A killed ping no longer writes bash's "Terminated: 15" job notice into the
+  log, and `now` returns as soon as the timeout fires instead of 5 seconds
+  later. A timeout is now flagged by the watchdog itself, so a ping that fails
+  on its own after the Mac slept through it is not mislabelled as a timeout.
+- A usage-limit reset time lands on the minute (it kept the current seconds,
+  so the resume could slip a tick), and "resets 6am" on the night of a DST
+  change resolves to 06:00, not 05:00 or 07:00.
+- The wait before `TIME` only happens when the tick at `TIME` would fire. It
+  no longer holds the Mac awake on a guardrail or low-battery day, during a
+  limit pause or failure back-off, after a daily ping, or inside an
+  already-open window. It also sleeps one second past `TIME`.
+- The failure streak restarts on the first failure of a new day, keyed on the
+  failure itself. A late-evening failure's retry crossing midnight no longer
+  carries the streak over and suppresses the next day's alert.
+- Claude and Codex skips are deduped separately, so both backing off at once
+  logs each reason once instead of on every tick.
+- `status --json` reports `retry_at` as `null` once the retry time has passed.
+
 ## [0.5.3-beta] — 2026-10-20
 
 ### Fixed

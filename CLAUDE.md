@@ -15,7 +15,8 @@ and dependency-free.
 ## Commands
 
 ```bash
-bash tests/run.sh                     # full test suite (~3s, 190 assertions)
+bash tests/run.sh                     # full test suite (~4s, 212 assertions)
+bash tests/regression.sh              # notifier, CLI routing, and an end-to-end tick under set -euo pipefail
 ./scripts/lint.sh                     # bash -n + shellcheck + dead-code check
 git config core.hooksPath .githooks   # one-time: enable the pre-commit gate
 ```
@@ -65,8 +66,9 @@ A single `launchd` agent runs `claude-prewarm tick` every 5 minutes
 ago the *last* fire was — read from `last_fire` in the state dir — not a fixed
 wall-clock table. So the next window always opens one tick after the current one
 expires, even if a fire landed hours late (Mac asleep). A tick, in order:
-validate config → wait for `TIME` if it is under 5 minutes away (the overnight
-wake lands at `TIME`-1 and macOS re-sleeps within seconds) → check skip
+validate config → wait for `TIME` if it is under 5 minutes away and the tick
+at `TIME` would fire (the overnight wake lands at `TIME`-1 and macOS re-sleeps
+within seconds) → check skip
 conditions (outside active hours, wrong day, holiday/skip-date, too little time
 before `END`, low battery) → back off if a usage limit was hit (reset time
 parsed from the limit message into `limit_until`) or the last ping failed

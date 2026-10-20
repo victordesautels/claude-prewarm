@@ -89,9 +89,9 @@ battery_info() {  # prints "source|percent"; source is ac, battery, or unknown
   [[ "$pct" =~ ^[0-9]+$ ]] || pct=""
   printf '%s|%s\n' "$source" "$pct"
 }
-current_skip_reason() {
+current_skip_reason() {  # $1 = minute of day to judge (default now; wait_for_time asks about TIME)
   local n today h binfo bsrc bpct rem
-  n=$(now_min); today=$(date '+%F')
+  n="${1:-$(now_min)}"; today=$(date '+%F')
   [ "$MODE" = "manual" ] && { echo "mode manual"; return 0; }
   { [ "$n" -ge "$(to_min "$TIME")" ] && [ "$n" -le "$(to_min "$END")" ]; } || { echo "outside active hours"; return 0; }
   is_scheduled_today || { echo "not a scheduled day"; return 0; }
@@ -132,16 +132,18 @@ check_wake_ac() {
   notify alert "Claude prewarm - plug in" "Mac is on battery. The $target $TIME wake will not fully wake it and the prewarm will be missed. Connect power."
   return 0
 }
+# LAST_SKIP holds today's latest "YYYYMMDD|agent|reason" per agent (all, claude,
+# codex), so Claude and Codex skips don't keep displacing each other.
 record_skip_once() {  # $1=agent $2=reason
-  local agent="$1" reason="$2" key prev a b ts
-  ts="$(date '+%Y-%m-%d %H:%M:%S')"; key="$(date '+%Y%m%d')|$agent|$reason"
-  prev="$(cat "$LAST_SKIP" 2>/dev/null || true)"
-  # Same day + same reason with digits masked = already logged. A countdown
-  # ("only 55m left", then "50m") or a draining battery % is one skip, not one
-  # log line per tick.
-  a="${key#*|}"; b="${prev#*|}"
-  [ "${prev%%|*}" = "${key%%|*}" ] && [ "${a//[0-9]/#}" = "${b//[0-9]/#}" ] && return 0
-  echo "$key" > "$LAST_SKIP"
+  local agent="$1" reason="$2" day prev ts
+  ts="$(date '+%Y-%m-%d %H:%M:%S')"; day="$(date '+%Y%m%d')"
+  prev="$(awk -F'|' -v d="$day" -v ag="$agent" '$1 == d && $2 == ag { r = $3 } END { print r }' "$LAST_SKIP" 2>/dev/null || true)"
+  # Same reason with digits masked = already logged today. A countdown ("only
+  # 55m left", then "50m") or a draining battery % is one skip, not one log line
+  # per tick.
+  [ -n "$prev" ] && [ "${prev//[0-9]/#}" = "${reason//[0-9]/#}" ] && return 0
+  { awk -F'|' -v d="$day" -v ag="$agent" '$1 == d && $2 != ag' "$LAST_SKIP" 2>/dev/null || true
+    echo "$day|$agent|$reason"; } > "$LAST_SKIP.tmp" && mv "$LAST_SKIP.tmp" "$LAST_SKIP"
   printf '%s  SKIP    %s: %s\n' "$ts" "$agent" "$reason" >> "$LOG"
 }
 record_recovery() {  # $1=agent $2=due_epoch $3=fired_epoch $4=delay_min $5=next_epoch
@@ -156,17 +158,32 @@ record_ping() {  # $1 = epoch
 }
 # A failed ping (expired login, network down, a limit message detect_limit does
 # not know) backs off 15m, 30m, then hourly, instead of retrying — and alerting —
-# on every 5-minute tick. The streak restarts each day; a clean ping deletes the
-# file. Prints the streak length so only its first failure notifies.
+# on every 5-minute tick. The streak restarts on the first failure of a new day
+# (keyed on the last failure, not the retry time, which can cross midnight); a
+# clean ping deletes the file. Prints the streak length so only its first
+# failure notifies.
 record_failure() {  # $1 = backoff file  $2 = now epoch
-  local f="$1" nowE="$2" n=0 retry=0 delay
-  [ -f "$f" ] && IFS='|' read -r n retry < "$f" 2>/dev/null || true
-  { [[ "$n" =~ ^[0-9]+$ ]] && [[ "$retry" =~ ^[0-9]+$ ]]; } || { n=0; retry=0; }
-  [ "$retry" -gt 0 ] && [ "$(epoch_day "$retry")" != "$(epoch_day "$nowE")" ] && n=0
+  local f="$1" nowE="$2" n=0 retry=0 last=0 delay
+  [ -f "$f" ] && IFS='|' read -r n retry last < "$f" 2>/dev/null || true
+  { [[ "$n" =~ ^[0-9]+$ ]] && [[ "$last" =~ ^[0-9]+$ ]]; } || { n=0; last=0; }
+  [ "$last" -gt 0 ] && [ "$(epoch_day "$last")" != "$(epoch_day "$nowE")" ] && n=0
   n=$(( n + 1 ))
   case "$n" in 1) delay=15;; 2) delay=30;; *) delay=60;; esac
-  printf '%s|%s\n' "$n" "$(( nowE + delay * 60 ))" > "$f"
+  printf '%s|%s|%s\n' "$n" "$(( nowE + delay * 60 ))" "$nowE" > "$f"
   echo "$n"
+}
+# Would the Claude ping be due at epoch $1, going by the usage-limit pause, the
+# failure back-off, and the mode's cadence? Whether a window is already open is
+# a separate (slower) check: window_anchor.
+claude_due() {  # $1 = epoch
+  local at="$1" lf lf_day
+  [ "$(read_limit_until)" -gt "$at" ] && return 1
+  [ "$(read_fail_until "$FAIL_BACKOFF")" -gt "$at" ] && return 1
+  lf=$(read_lf)
+  lf_day=$( [ "$lf" -gt 0 ] && date -r "$lf" '+%Y%m%d' 2>/dev/null || echo 0 )
+  { [ "$lf" -eq 0 ] || [ "$lf_day" != "$(date -r "$at" '+%Y%m%d')" ]; } && return 0
+  [ "$MODE" = "daily" ] && return 1                       # once a day: already fired
+  [ "$at" -ge $(( lf + $(mode_interval_min) * 60 )) ]
 }
 recovery_summary() {
   [ -f "$LAST_RECOVERY" ] || return 1
@@ -199,7 +216,7 @@ json_num_or_null() {
 # am/pm time over a bare colon time. Recognizes "3pm", "3:30 PM", "15:00". rc 1 if
 # nothing parseable.
 parse_reset_epoch() {   # $1 = message
-  local msg="$1" scope h m ap base now
+  local msg="$1" scope h m ap hm base now
   case "$msg" in *[Rr]eset*) scope="${msg#*[Rr]eset}";; *) scope="$msg";; esac
   if   [[ "$scope" =~ ([0-9]{1,2}):([0-9]{2})[[:space:]]*([AaPp][Mm]) ]]; then   # H:MM am/pm
     h=${BASH_REMATCH[1]}; m=${BASH_REMATCH[2]}; ap="${BASH_REMATCH[3]}"
@@ -213,9 +230,14 @@ parse_reset_epoch() {   # $1 = message
     [Aa][Mm]) [ "$((10#$h))" -eq 12 ] && h=0;;
   esac
   [ "$((10#$h))" -ge 0 ] && [ "$((10#$h))" -le 23 ] || return 1
-  base="$(date -j -f '%Y-%m-%d %H:%M' "$(date +%F) $(printf '%02d:%02d' "$((10#$h))" "$((10#$m))")" +%s 2>/dev/null)" || return 1
+  hm="$(printf '%02d:%02d:00' "$((10#$h))" "$((10#$m))")"
+  base="$(date -j -f '%Y-%m-%d %H:%M:%S' "$(date +%F) $hm" +%s 2>/dev/null)" || return 1
   now=$(date +%s)
-  [ "$base" -le "$now" ] && base=$(( base + 86400 ))   # reset is later today or tomorrow
+  # reset is later today or tomorrow; parse tomorrow's date rather than adding
+  # 86400, which lands an hour off across a DST change
+  if [ "$base" -le "$now" ]; then
+    base="$(date -j -f '%Y-%m-%d %H:%M:%S' "$(date -v+1d +%F) $hm" +%s 2>/dev/null)" || return 1
+  fi
   echo "$base"
 }
 # Detect a usage-limit response. On match: echo the reset epoch (0 if unknown) and
@@ -313,7 +335,7 @@ save_config() {   # %q round-trips arbitrary content safely (quotes, $(), spaces
 last_skip_summary() {
   [ -f "$LAST_SKIP" ] || return 1
   local day agent reason
-  IFS='|' read -r day agent reason < "$LAST_SKIP" || return 1
+  IFS='|' read -r day agent reason <<< "$(tail -n1 "$LAST_SKIP")" || return 1
   [ -n "$day" ] && [ -n "$agent" ] && [ -n "$reason" ] || return 1
   printf '%s %s: %s\n' "$day" "$agent" "$reason"
 }
