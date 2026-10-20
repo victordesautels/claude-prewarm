@@ -186,11 +186,12 @@ print_fire_result() {
 cmd_status() {
   local json=0
   case "${1:-}" in --json|json) json=1;; "") ;; *) die "usage: claude-prewarm status [--json]";; esac
-  local loaded="no" awake_loaded="no" lf clf act anchor n nowE elapsed lu clu skip="" next_due=0 cnext_due=0 binfo bsrc bpct rec="" lskip=""
+  local loaded="no" awake_loaded="no" lf clf act anchor n nowE elapsed lu clu fu cfu skip="" next_due=0 cnext_due=0 binfo bsrc bpct rec="" lskip=""
   agent_loaded "$LABEL"       && loaded="yes"
   agent_loaded "$AWAKE_LABEL" && awake_loaded="yes"
   lf=$(read_lf); clf=$(read_codex_lf); act=$(last_activity); anchor=$(window_anchor)
   n=$(now_min); nowE=$(date '+%s'); lu=$(read_limit_until); clu=$(read_codex_limit_until)
+  fu=$(read_fail_until "$FAIL_BACKOFF"); cfu=$(read_fail_until "$CODEX_FAIL_BACKOFF")
   next_due=$(next_due_epoch "$lf")
   cnext_due=$(next_due_epoch "$clf")
   [ "$CODEX" = "true" ] || cnext_due=0
@@ -212,14 +213,15 @@ cmd_status() {
     printf '"last_skip":"%s",' "$(json_escape "$lskip")"
     printf '"last_recovery":"%s",' "$(json_escape "$rec")"
     printf '"schedule":{"days":"%s","time":"%s","end":"%s","cadence_minutes":%s},' "$(json_escape "$DAYS")" "$(json_escape "$TIME")" "$(json_escape "$END")" "$(mode_interval_min)"
-    printf '"claude":{"window_anchor":%s,"window_end":%s,"last_fire":%s,"next_due":%s,"limit_until":%s},' \
+    printf '"claude":{"window_anchor":%s,"window_end":%s,"last_fire":%s,"next_due":%s,"limit_until":%s,"retry_at":%s},' \
       "$(json_num_or_null "$anchor")" \
       "$( [ "$anchor" -gt 0 ] && echo $(( anchor + INTERVAL * 60 )) || echo null )" \
       "$(json_num_or_null "$lf")" \
       "$(json_num_or_null "$next_due")" \
-      "$(json_num_or_null "$lu")"
-    printf '"codex":{"enabled":%s,"last_fire":%s,"next_due":%s,"limit_until":%s},' \
-      "$(json_bool "$CODEX")" "$(json_num_or_null "$clf")" "$(json_num_or_null "$cnext_due")" "$(json_num_or_null "$clu")"
+      "$(json_num_or_null "$lu")" \
+      "$(json_num_or_null "$fu")"
+    printf '"codex":{"enabled":%s,"last_fire":%s,"next_due":%s,"limit_until":%s,"retry_at":%s},' \
+      "$(json_bool "$CODEX")" "$(json_num_or_null "$clf")" "$(json_num_or_null "$cnext_due")" "$(json_num_or_null "$clu")" "$(json_num_or_null "$cfu")"
     printf '"guardrails":{"low_battery_skip":%s,"battery_source":"%s","battery_percent":%s,"min_battery_percent":%s,"min_remaining_minutes":%s},' \
       "$(json_bool "$LOW_BATTERY_SKIP")" "$(json_escape "$bsrc")" "$([ -n "$bpct" ] && echo "$bpct" || echo null)" "$MIN_BATTERY_PERCENT" "$MIN_REMAINING_MIN"
     printf '"paths":{"log":"%s","config":"%s"}}\n' "$(json_escape "$LOG")" "$(json_escape "$CONFIG")"
@@ -233,6 +235,8 @@ cmd_status() {
     printf '  %s %s\n' "$(yellow "$S_WARN not installed")" "$(dim "— run: claude-prewarm install")"
   elif [ "$lu" -gt "$nowE" ]; then
     printf '  %s %s\n' "$(yellow "$S_WARN limited")" "$(dim "usage limit — prewarms paused until $(date -r "$lu" '+%H:%M')")"
+  elif [ "$fu" -gt "$nowE" ]; then
+    printf '  %s %s\n' "$(yellow "$S_WARN failing")" "$(dim "last ping failed — retrying at $(date -r "$fu" '+%H:%M') · claude-prewarm logs")"
   elif [ "$anchor" -gt 0 ] && [ "$elapsed" -lt "$INTERVAL" ]; then
     printf '  %s %s\n' "$(green "$S_DOT active")" "$(dim "window open until $(date -r $((anchor+INTERVAL*60)) '+%H:%M') · $((INTERVAL-elapsed))m left")"
   elif [ -n "$skip" ]; then
@@ -278,6 +282,8 @@ cmd_status() {
   [ -n "$lskip" ] && row "last skip" "$lskip"
   [ "$lu" -gt "$nowE" ] && row "limit" "$(yellow "$S_WARN paused") $(dim "until $(date -r "$lu" '+%H:%M')")"
   [ "$clu" -gt "$nowE" ] && row "codex lim" "$(yellow "$S_WARN paused") $(dim "until $(date -r "$clu" '+%H:%M')")"
+  [ "$fu" -gt "$nowE" ] && row "retry" "$(yellow "$S_WARN failed") $(dim "retrying at $(date -r "$fu" '+%H:%M')")"
+  [ "$cfu" -gt "$nowE" ] && row "codex err" "$(yellow "$S_WARN failed") $(dim "retrying at $(date -r "$cfu" '+%H:%M')")"
 
   printf '\n'
   command -v ccusage >/dev/null 2>&1 && row "ccusage" "$(dim "installed — run 'ccusage blocks' for live token spend")"

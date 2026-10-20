@@ -223,6 +223,17 @@ assert_ok   "detect_limit epoch is integer"      _is_pos_int "$LIM_EPOCH"
 RST_EPOCH="$(parse_reset_epoch 'your limit will reset 3pm today')"
 assert_ok   "parse_reset_epoch epoch is integer" _is_pos_int "$RST_EPOCH"
 assert_fail "parse_reset_epoch 'no time here'"   parse_reset_epoch "no time here"
+# Claude Code 2.x wording, verbatim from the 2026-08/09 log (both were logged as
+# FAILED with no back-off before "hit your … limit" was recognized)
+assert_eq   "spend limit w/o reset time -> epoch 0" 0 \
+            "$(detect_limit "You've hit your individual spend limit · run /usage-credits to ask your admin for a higher limit")"
+SPEND_EPOCH="$(detect_limit "You've hit your org's monthly spend limit · run /usage-credits to ask your admin for a higher limit · your weekly limit resets 6am (America/Toronto)")"
+assert_ok   "org spend limit -> reset epoch"     _is_pos_int "$SPEND_EPOCH"
+assert_eq   "  ...parsed as the next 06:00"      "06:00" "$(date -r "${SPEND_EPOCH:-0}" '+%H:%M')"
+assert_fail "'hit your' without 'limit' is not a limit" detect_limit "Looks like the ping hit your server"
+
+section "today_epoch"
+assert_eq   "lands on the minute (no stray seconds)" 0 "$(( $(today_epoch 06:00) % 60 ))"
 
 # ============================================================================
 # config validation (lib/policy.bash validate_config) — die -> exit 2
@@ -284,21 +295,28 @@ LAST_SKIP="$STATE_DIR/last_skip"
 LAST_RECOVERY="$STATE_DIR/last_recovery"
 WAKE_MARK="$STATE_DIR/wake_set"
 WAKE_AC_WARNED="$STATE_DIR/wake_ac_warned"
+FIRE_HISTORY="$STATE_DIR/fire_history"
+FAIL_BACKOFF="$STATE_DIR/fail_backoff"
+CODEX_FAIL_BACKOFF="$STATE_DIR/codex_fail_backoff"
 CLAUDE_PROJECTS="$RT_SANDBOX/claude_projects"; mkdir -p "$CLAUDE_PROJECTS"  # empty => no open window
 PLIST="$RT_SANDBOX/agent.plist"
 AWAKE_PLIST="$RT_SANDBOX/awake.plist"
 LABEL="com.claude-prewarm.test"
 AWAKE_LABEL="com.claude-prewarm.test.awake"
 SELF="$STUB_BIN/claude-prewarm"
-TICK_SECONDS=300; GRACE_MIN=8
+TICK_SECONDS=300; GRACE_MIN=8; PING_TIMEOUT=180
 
 _mkstub() {  # $1=name  $2=body (single-quoted; $RT_* expand at stub runtime, not now)
   { printf '#!/usr/bin/env bash\n'; printf '%s\n' "$2"; } > "$STUB_BIN/$1"
   chmod +x "$STUB_BIN/$1"
 }
-_mkstub claude     'echo "$@" >> "$RT_CALLS/claude"; printf "%s" "${STUB_CLAUDE_OUT:-pong}"; exit "${STUB_CLAUDE_RC:-0}"'
+# claude: $STUB_CLAUDE_HANG seconds of silence first simulates a hung ping.
+_mkstub claude     'echo "$@" >> "$RT_CALLS/claude"; [ -n "${STUB_CLAUDE_HANG:-}" ] && sleep "$STUB_CLAUDE_HANG"; printf "%s" "${STUB_CLAUDE_OUT:-pong}"; exit "${STUB_CLAUDE_RC:-0}"'
 _mkstub codex      'echo "$@" >> "$RT_CALLS/codex";  printf "%s" "${STUB_CODEX_OUT:-pong}";  exit "${STUB_CODEX_RC:-0}"'
 _mkstub caffeinate 'echo "$@" >> "$RT_CALLS/caffeinate"; exit 0'
+# sleep: real unless $STUB_SLEEP is set (then it only records), so wait_for_time
+# can be tested without waiting while run_with_timeout's watchdog still sleeps.
+_mkstub sleep      '[ -n "${STUB_SLEEP:-}" ] && { echo "$@" >> "$RT_CALLS/sleep"; exit 0; }; exec /bin/sleep "$@"'
 _mkstub osascript  'echo "$@" >> "$RT_CALLS/osascript"; exit 0'
 _mkstub sudo       'echo "$@" >> "$RT_CALLS/sudo"; exec "$@"'
 # pmset: emits $STUB_PMSET_BATT for `-g batt` so battery_info can be driven.
@@ -324,8 +342,17 @@ exit 0'
 PATH="$STUB_BIN:$PATH"; export PATH
 
 _logtail()    { tail -n1 "$LOG" 2>/dev/null; }
-_reset_fire() { : > "$LOG"; rm -f "$LAST_FIRE" "$LIMIT_UNTIL" "$LAST_SKIP" "$RT_CALLS/claude"; rm -rf "$STATE_DIR/fire.lock"; }
-_reset_codex(){ : > "$LOG"; rm -f "$CODEX_LAST_FIRE" "$CODEX_LIMIT_UNTIL" "$RT_CALLS/codex"; rm -rf "$STATE_DIR/codex.fire.lock"; }
+_reset_fire() { : > "$LOG"; rm -f "$LAST_FIRE" "$LIMIT_UNTIL" "$LAST_SKIP" "$FIRE_HISTORY" "$FAIL_BACKOFF" "$RT_CALLS/claude"; rm -rf "$STATE_DIR/fire.lock"; }
+_reset_codex(){ : > "$LOG"; rm -f "$CODEX_LAST_FIRE" "$CODEX_LIMIT_UNTIL" "$CODEX_FAIL_BACKOFF" "$RT_CALLS/codex"; rm -rf "$STATE_DIR/codex.fire.lock"; }
+# hold_awake starts caffeinate in the background: give the stub a moment to log.
+_wait_for_call() {  # $1 = stub name, $2 = needle
+  local i=0
+  while [ "$i" -lt 40 ]; do
+    case "$(cat "$RT_CALLS/$1" 2>/dev/null)" in *"$2"*) return 0;; esac
+    /bin/sleep 0.05; i=$(( i + 1 ))
+  done
+  return 1
+}
 
 set_valid_config   # baseline valid config (defined in the validate_config section)
 
@@ -420,15 +447,30 @@ assert_ok       "records the warned target date"  test -s "$WAKE_AC_WARNED"
 
 # ---- time_state: window_anchor from session logs ---------------------------
 section "time_state: window_anchor"
-rm -f "$LAST_FIRE" "$CLAUDE_PROJECTS"/*.jsonl
+rm -f "$LAST_FIRE" "$FIRE_HISTORY" "$CLAUDE_PROJECTS"/*.jsonl
+WA_NOW=$(date +%s)
+_iso() { date -u -r "$(( WA_NOW - $1 ))" '+%Y-%m-%dT%H:%M:%S.000Z'; }   # $1 = seconds ago
+_reply() { printf '{"type":"assistant","timestamp":"%s","message":{"model":"%s"}}\n' "$(_iso "$1")" "${2:-claude-opus}"; }
 assert_eq "no logs + no last-fire -> anchor 0"     0 "$(INTERVAL=300; window_anchor)"
-RECENT_ISO="$(date -u -v-3M '+%Y-%m-%dT%H:%M:%S.000Z')"
-printf '{"timestamp":"%s","type":"user"}\n' "$RECENT_ISO" > "$CLAUDE_PROJECTS/session.jsonl"
-assert_ok "recent session -> window open (anchor>0)" _is_pos_int "$(INTERVAL=300; window_anchor)"
-OLD_ISO="$(date -u -v-6H '+%Y-%m-%dT%H:%M:%S.000Z')"
-printf '{"timestamp":"%s","type":"user"}\n' "$OLD_ISO" > "$CLAUDE_PROJECTS/session.jsonl"
-assert_eq "6h-old session (5h window) -> closed"   0 "$(INTERVAL=300; window_anchor)"
-rm -f "$CLAUDE_PROJECTS"/*.jsonl
+_reply 180 > "$CLAUDE_PROJECTS/session.jsonl"
+assert_eq "reply 3m ago -> window opened then"     "$(( WA_NOW - 180 ))" "$(INTERVAL=300; window_anchor)"
+_reply 21600 > "$CLAUDE_PROJECTS/session.jsonl"
+assert_eq "6h-old reply (5h window) -> closed"     0 "$(INTERVAL=300; window_anchor)"
+printf '{"type":"user","timestamp":"%s"}\n' "$(_iso 180)" > "$CLAUDE_PROJECTS/session.jsonl"
+assert_eq "user line alone (no API reply) -> closed" 0 "$(INTERVAL=300; window_anchor)"
+_reply 180 '<synthetic>' > "$CLAUDE_PROJECTS/session.jsonl"
+assert_eq "synthetic error reply -> closed"        0 "$(INTERVAL=300; window_anchor)"
+# a session started yesterday and resumed today: its first line is old, but the
+# reply 1h ago opened today's window
+{ _reply 79200; _reply 3600; } > "$CLAUDE_PROJECTS/session.jsonl"
+assert_eq "resumed session -> today's window"      "$(( WA_NOW - 3600 ))" "$(INTERVAL=300; window_anchor)"
+# Our pings leave no session log. Pings 7h and 2h ago, your work 4h ago: the 4h-ago
+# reply sat inside the 7h-ago window, so the open window is the 2h-ago ping's.
+_reply 14400 > "$CLAUDE_PROJECTS/session.jsonl"
+printf '%s\n%s\n' "$(( WA_NOW - 25200 ))" "$(( WA_NOW - 7200 ))" > "$FIRE_HISTORY"
+printf '%s' "$(( WA_NOW - 7200 ))" > "$LAST_FIRE"
+assert_eq "ping history keeps the real boundary"   "$(( WA_NOW - 7200 ))" "$(INTERVAL=300; window_anchor)"
+rm -f "$LAST_FIRE" "$FIRE_HISTORY" "$CLAUDE_PROJECTS"/*.jsonl
 
 # ---- fire: do_fire outcomes -------------------------------------------------
 section "fire: do_fire success"
@@ -439,6 +481,8 @@ assert_ok       "records a positive last_fire"    _is_pos_int "$(read_lf)"
 assert_contains "logs an ok anchor fire"          "$(_logtail)" "ok  anchor"
 assert_contains "invokes claude with -p"          "$(cat "$RT_CALLS/claude" 2>/dev/null)" "-p"
 assert_contains "ping skips session persistence"  "$(cat "$RT_CALLS/claude" 2>/dev/null)" "--no-session-persistence"
+assert_eq       "records the ping in fire_history" "$(read_lf)" "$(tail -n1 "$FIRE_HISTORY" 2>/dev/null)"
+assert_ok       "holds the Mac awake for the ping" _wait_for_call caffeinate "-w"
 
 # A boundary fire that's overdue (Mac was asleep) must log DELAYED and record
 # recovery. Seed last-fire 1h ago; with INTERVAL=5 the boundary was due ~55m ago.
@@ -458,11 +502,44 @@ assert_ok       "writes a positive limit_until"   _is_pos_int "$(read_limit_unti
 assert_contains "logs a LIMIT line"               "$(_logtail)" "LIMIT"
 assert_eq       "does NOT advance last_fire"      0 "$(read_lf)"
 
-section "fire: do_fire failure"
+section "fire: do_fire spend limit (rc=1) backs off"
 _reset_fire
-( export STUB_CLAUDE_RC=7 STUB_CLAUDE_OUT="boom"
+( export STUB_CLAUDE_RC=1 STUB_CLAUDE_OUT="You've hit your org's monthly spend limit · your weekly limit resets 6am (America/Toronto)"
   MODE="standard"; INTERVAL=300; TIME="$(date +%H:%M)"; END="23:59"; NOTIFY="false"; do_fire tick )
-assert_contains "logs a FAILED line with rc"      "$(_logtail)" "FAILED  rc=7"
+assert_contains "logs LIMIT, not FAILED"          "$(_logtail)" "LIMIT"
+assert_ok       "writes a positive limit_until"   _is_pos_int "$(read_limit_until)"
+
+# A failed ping backs off 15m, 30m, then hourly, and only the first failure of the
+# streak notifies — before this, every 5-minute tick re-pinged and re-alerted.
+section "fire: do_fire failure backs off"
+_reset_fire; rm -f "$RT_CALLS/osascript"
+_fail_fire() { ( export STUB_CLAUDE_RC=7 STUB_CLAUDE_OUT="boom"
+  MODE="standard"; INTERVAL=300; TIME="$(date +%H:%M)"; END="23:59"; NOTIFY="true"; do_fire tick ); }
+_fail_fire
+FB_NOW=$(date +%s)
+assert_contains "logs a FAILED line with rc"      "$(_logtail)" "FAILED  rc=7  retry"
+assert_eq       "does NOT advance last_fire"      0 "$(read_lf)"
+assert_eq       "streak 1"                        1 "$(cut -d'|' -f1 "$FAIL_BACKOFF")"
+assert_ok       "retry ~15m out"                  test $(( $(read_fail_until "$FAIL_BACKOFF") - FB_NOW )) -ge 890
+assert_ok       "first failure notifies"          test -s "$RT_CALLS/osascript"
+rm -f "$RT_CALLS/osascript"; _fail_fire
+assert_eq       "streak 2"                        2 "$(cut -d'|' -f1 "$FAIL_BACKOFF")"
+assert_ok       "retry ~30m out"                  test $(( $(read_fail_until "$FAIL_BACKOFF") - FB_NOW )) -ge 1790
+assert_fail     "second failure stays quiet"      test -s "$RT_CALLS/osascript"
+_fail_fire
+assert_ok       "third retry ~60m out"            test $(( $(read_fail_until "$FAIL_BACKOFF") - FB_NOW )) -ge 3590
+printf '9|%s\n' "$(( FB_NOW - 86400 ))" > "$FAIL_BACKOFF"; _fail_fire
+assert_eq       "yesterday's streak restarts at 1" 1 "$(cut -d'|' -f1 "$FAIL_BACKOFF")"
+( export STUB_CLAUDE_RC=0 STUB_CLAUDE_OUT="pong"
+  MODE="standard"; INTERVAL=300; TIME="$(date +%H:%M)"; END="23:59"; NOTIFY="false"; do_fire tick )
+assert_fail     "a clean ping clears the back-off" test -f "$FAIL_BACKOFF"
+
+section "fire: do_fire kills a hung ping"
+_reset_fire
+( export STUB_CLAUDE_HANG=4 STUB_CLAUDE_RC=0
+  PING_TIMEOUT=1; MODE="standard"; INTERVAL=300; TIME="$(date +%H:%M)"; END="23:59"; NOTIFY="false"; do_fire tick )
+assert_contains "logs FAILED rc=124"              "$(_logtail)" "FAILED  rc=124"
+assert_contains "says it timed out"               "$(_logtail)" "timed out after 1s"
 assert_eq       "does NOT advance last_fire"      0 "$(read_lf)"
 
 section "fire: do_fire manual inside open window"
@@ -509,6 +586,43 @@ _tick_due() { export STUB_CLAUDE_RC=0 STUB_CLAUDE_OUT="pong"
 assert_ok       "cmd_tick fired -> last_fire set" _is_pos_int "$(read_lf)"
 assert_ok       "cmd_tick pinged claude"          test -s "$RT_CALLS/claude"
 assert_contains "cmd_tick logs an ok fire"        "$(_logtail)" "ok"
+
+section "fire: cmd_tick honors the failure back-off"
+_reset_fire
+printf '1|%s\n' "$(( $(date +%s) + 600 ))" > "$FAIL_BACKOFF"
+( _tick_due )
+assert_fail     "does NOT ping claude"            test -s "$RT_CALLS/claude"
+assert_contains "logs the pending retry"          "$(_logtail)" "retrying failed ping at"
+rm -f "$FAIL_BACKOFF"
+
+section "policy: record_skip_once dedupes countdowns"
+_reset_fire
+record_skip_once all "guardrail: only 55m left before END"
+record_skip_once all "guardrail: only 50m left before END"
+record_skip_once all "guardrail: battery 19%"
+record_skip_once all "guardrail: battery 18%"
+assert_eq       "one line per distinct reason"    2 "$(grep -c SKIP "$LOG")"
+
+# A tick a minute or two before TIME (the overnight wake lands at TIME-1) must
+# hold the Mac awake and wait for TIME rather than skip. sleep is stubbed.
+section "fire: wait_for_time"
+if [ "$(now_min)" -lt 1430 ] && [ "$(now_min)" -gt 0 ]; then
+  _wft() { ( export STUB_SLEEP=1; MODE="standard"; DAYS="daily"; CALENDAR="none"; SKIP_DATES=""
+             TIME="$1"; wait_for_time ) ; }
+  : > "$LOG"; rm -f "$RT_CALLS/sleep" "$RT_CALLS/caffeinate"
+  _wft "$(to_hm $(( $(now_min) + 2 )))"
+  WFT_S="$(cat "$RT_CALLS/sleep" 2>/dev/null)"
+  assert_contains "logs a WAIT line"              "$(_logtail)" "WAIT"
+  assert_ok       "sleeps 61-120s until TIME"     test "${WFT_S:-0}" -ge 61 -a "${WFT_S:-0}" -le 120
+  assert_ok       "holds the Mac awake meanwhile" _wait_for_call caffeinate "-w"
+  : > "$LOG"; rm -f "$RT_CALLS/sleep"
+  _wft "$(to_hm $(( $(now_min) - 1 )))"
+  assert_fail     "TIME already passed -> no wait" test -s "$RT_CALLS/sleep"
+  _wft "$(to_hm $(( $(now_min) + 10 )))"
+  assert_fail     "TIME 10m away -> no wait"      test -s "$RT_CALLS/sleep"
+else
+  _pass "wait_for_time (skipped: edge of day)"
+fi
 
 # ---- fire: cmd_keepawake ----------------------------------------------------
 # dur = END - now; guard the final minute of the day where dur would be 0.

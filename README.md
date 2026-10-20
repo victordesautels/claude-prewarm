@@ -93,9 +93,15 @@ A `launchd` agent runs `claude-prewarm tick` every 5 minutes. Each tick:
    or custom skip date, too little time left before `END`, or low battery
    (if the opt-in low-battery guardrail is enabled).
 3. Backs off if a usage limit was hit (parses the reset time from the limit
-   message and pauses until then).
+   message and pauses until then), or if the last ping failed (retries after
+   15 minutes, then 30, then hourly).
 4. Fires a `claude -p` ping only if no window is currently open **and** the
-   cadence for the selected mode says one is due.
+   cadence for the selected mode says one is due. The ping holds the Mac awake
+   until it finishes and is killed if it hangs for 3 minutes.
+
+A tick in the last few minutes before `TIME` waits for `TIME` instead of
+skipping, holding the Mac awake meanwhile. The overnight wake lands a minute
+before `TIME` and macOS would otherwise fall back asleep before the next tick.
 
 An optional companion agent runs `caffeinate` from `WORKSTART` to `END` (no
 sudo) so midday fires land on time. An optional overnight `pmset` wake (the only
@@ -103,8 +109,9 @@ privileged action — prompts for admin once during install) wakes the Mac befor
 the morning anchor. Notifications distinguish an on-time fire from one that
 fired late because the Mac had been asleep.
 
-State lives in `~/.local/state/claude-prewarm/` (last-fire timestamps, limit
-back-off, logs); config in `~/.config/claude-prewarm/config`.
+State lives in `~/.local/state/claude-prewarm/` (last-fire timestamps, the
+last day of pings, limit and failure back-off, logs); config in
+`~/.config/claude-prewarm/config`.
 
 ## Uninstall
 

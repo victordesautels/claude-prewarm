@@ -15,7 +15,7 @@ and dependency-free.
 ## Commands
 
 ```bash
-bash tests/run.sh                     # full test suite (~2s, 141 assertions)
+bash tests/run.sh                     # full test suite (~3s, 190 assertions)
 ./scripts/lint.sh                     # bash -n + shellcheck + dead-code check
 git config core.hooksPath .githooks   # one-time: enable the pre-commit gate
 ```
@@ -65,12 +65,16 @@ A single `launchd` agent runs `claude-prewarm tick` every 5 minutes
 ago the *last* fire was — read from `last_fire` in the state dir — not a fixed
 wall-clock table. So the next window always opens one tick after the current one
 expires, even if a fire landed hours late (Mac asleep). A tick, in order:
-validate config → check skip conditions (outside active hours, wrong day,
-holiday/skip-date, too little time before `END`, low battery) → back off if a
-usage limit was hit (reset time parsed from the limit message into
-`limit_until`) → fire only if no window is currently open **and** the mode's
-cadence says one is due. `fire.bash` holds this decision logic; understand it
-before touching firing behavior.
+validate config → wait for `TIME` if it is under 5 minutes away (the overnight
+wake lands at `TIME`-1 and macOS re-sleeps within seconds) → check skip
+conditions (outside active hours, wrong day, holiday/skip-date, too little time
+before `END`, low battery) → back off if a usage limit was hit (reset time
+parsed from the limit message into `limit_until`) or the last ping failed
+(`fail_backoff`) → fire only if the mode's cadence says one is due **and** no
+window is currently open. `window_anchor` replays a day of session-log replies
+plus `fire_history` (pings run with `--no-session-persistence`, so they leave no
+log) and takes ~2s, which is why it is checked after the cadence. `fire.bash`
+holds this decision logic; understand it before touching firing behavior.
 
 ### Three independent times
 
@@ -83,8 +87,9 @@ legacy `KEEPALIVE` boolean for backward compat — see the mapping in both
 ### State and config (never hardcode these paths — use the globals)
 
 - Config: `~/.config/claude-prewarm/config` (sourced shell assignments).
-- State: `~/.local/state/claude-prewarm/` — `last_fire`, `limit_until`,
-  `codex_last_fire`, `wake_set`, `last_skip`, `last_recovery`, logs.
+- State: `~/.local/state/claude-prewarm/` — `last_fire`, `fire_history`,
+  `limit_until`, `fail_backoff`, `codex_last_fire`, `codex_fail_backoff`,
+  `wake_set`, `last_skip`, `last_recovery`, logs.
 - Claude session logs it reads to detect an already-open window:
   `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects`.
 

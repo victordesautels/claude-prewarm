@@ -4,6 +4,30 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.3-beta] — 2026-10-20
+
+### Fixed
+- A failed ping no longer retries and alerts on every 5-minute tick. It backs
+  off 15 minutes, then 30, then hourly, and only the first failure of the day
+  notifies. A clean ping clears the back-off. Until 0.5.2 a failed ping's
+  session log hid this by blocking retries for five hours.
+- Claude Code's "You've hit your … limit" messages (session, weekly, and spend
+  limits) are now recognized as usage limits. Prewarms pause until the reset
+  time instead of logging FAILED.
+- The morning anchor no longer misses the overnight wake. The `pmset` wake
+  lands a minute before `TIME`, and macOS was back asleep within 15–87 seconds,
+  before the tick could fire. A tick in the last 5 minutes before `TIME` now
+  holds the Mac awake (`caffeinate`) and waits for `TIME`. Every ping also
+  holds the Mac awake until it finishes.
+- Open-window detection reads every model reply in the last day of session
+  logs, not just each log's first line. A resumed session, or one that runs
+  across a window boundary, now registers the window it opens. Our own pings
+  are kept in `fire_history`, since they no longer leave a session log.
+- A hung ping is killed after 3 minutes. launchd does not start a new tick
+  while one is still running, so a hung ping stopped all prewarms.
+- Countdown skips ("only 55m left before END", a draining battery %) log once
+  a day instead of on every tick.
+
 ## [0.5.2-beta] — 2026-10-20
 
 ### Changed

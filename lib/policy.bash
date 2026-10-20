@@ -133,14 +133,40 @@ check_wake_ac() {
   return 0
 }
 record_skip_once() {  # $1=agent $2=reason
-  local agent="$1" reason="$2" key ts
+  local agent="$1" reason="$2" key prev a b ts
   ts="$(date '+%Y-%m-%d %H:%M:%S')"; key="$(date '+%Y%m%d')|$agent|$reason"
-  [ -f "$LAST_SKIP" ] && [ "$(cat "$LAST_SKIP" 2>/dev/null)" = "$key" ] && return 0
+  prev="$(cat "$LAST_SKIP" 2>/dev/null || true)"
+  # Same day + same reason with digits masked = already logged. A countdown
+  # ("only 55m left", then "50m") or a draining battery % is one skip, not one
+  # log line per tick.
+  a="${key#*|}"; b="${prev#*|}"
+  [ "${prev%%|*}" = "${key%%|*}" ] && [ "${a//[0-9]/#}" = "${b//[0-9]/#}" ] && return 0
   echo "$key" > "$LAST_SKIP"
   printf '%s  SKIP    %s: %s\n' "$ts" "$agent" "$reason" >> "$LOG"
 }
 record_recovery() {  # $1=agent $2=due_epoch $3=fired_epoch $4=delay_min $5=next_epoch
   printf '%s|%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" "$5" > "$LAST_RECOVERY"
+}
+# Remember a successful ping for window_anchor: with --no-session-persistence it
+# leaves no session log. Keeps one day of entries.
+record_ping() {  # $1 = epoch
+  local cut=$(( $1 - 86400 ))
+  { [ -f "$FIRE_HISTORY" ] && awk -v c="$cut" '/^[0-9]+$/ && $0 + 0 >= c' "$FIRE_HISTORY"; echo "$1"; } \
+    > "$FIRE_HISTORY.tmp" && mv "$FIRE_HISTORY.tmp" "$FIRE_HISTORY"
+}
+# A failed ping (expired login, network down, a limit message detect_limit does
+# not know) backs off 15m, 30m, then hourly, instead of retrying — and alerting —
+# on every 5-minute tick. The streak restarts each day; a clean ping deletes the
+# file. Prints the streak length so only its first failure notifies.
+record_failure() {  # $1 = backoff file  $2 = now epoch
+  local f="$1" nowE="$2" n=0 retry=0 delay
+  [ -f "$f" ] && IFS='|' read -r n retry < "$f" 2>/dev/null || true
+  { [[ "$n" =~ ^[0-9]+$ ]] && [[ "$retry" =~ ^[0-9]+$ ]]; } || { n=0; retry=0; }
+  [ "$retry" -gt 0 ] && [ "$(epoch_day "$retry")" != "$(epoch_day "$nowE")" ] && n=0
+  n=$(( n + 1 ))
+  case "$n" in 1) delay=15;; 2) delay=30;; *) delay=60;; esac
+  printf '%s|%s\n' "$n" "$(( nowE + delay * 60 ))" > "$f"
+  echo "$n"
 }
 recovery_summary() {
   [ -f "$LAST_RECOVERY" ] || return 1
@@ -194,13 +220,14 @@ parse_reset_epoch() {   # $1 = message
 }
 # Detect a usage-limit response. On match: echo the reset epoch (0 if unknown) and
 # return 0; return 1 for a normal response. Matches only the characteristic phrases
-# ("limit reached", "limit will reset") — NOT bare "rate limit"/"usage limit", which
-# a benign ping reply could contain (e.g. "rate limiting"). Guarded so a false hit
-# can't crash a tick.
+# ("limit reached", "limit will reset", and Claude Code's newer "You've hit your …
+# limit", used for session, weekly, and spend limits) — NOT bare "rate limit"/"usage
+# limit", which a benign ping reply could contain (e.g. "rate limiting"). Guarded so
+# a false hit can't crash a tick.
 detect_limit() {   # $1 = ping output (newline-collapsed)
   local msg="$1" rst
   case "$msg" in
-    *[Ll]"imit reached"*|*[Ll]"imit will reset"*)
+    *[Ll]"imit reached"*|*[Ll]"imit will reset"*|*"hit your"*[Ll]"imit"*)
       rst="$(parse_reset_epoch "$msg" 2>/dev/null || true)"
       echo "${rst:-0}"; return 0;;
   esac

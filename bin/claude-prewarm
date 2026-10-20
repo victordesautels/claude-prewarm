@@ -31,7 +31,7 @@
 #
 set -euo pipefail
 
-VERSION="0.5.2-beta"
+VERSION="0.5.3-beta"
 LABEL="com.claude-prewarm"
 AWAKE_LABEL="com.claude-prewarm.awake"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
@@ -48,10 +48,14 @@ CODEX_LIMIT_UNTIL="$STATE_DIR/codex_limit_until"
 LAST_SKIP="$STATE_DIR/last_skip"
 LAST_RECOVERY="$STATE_DIR/last_recovery"
 WAKE_AC_WARNED="$STATE_DIR/wake_ac_warned"   # target date already warned about (wake needs AC)
+FIRE_HISTORY="$STATE_DIR/fire_history"       # epochs of the last day's pings (they leave no session log)
+FAIL_BACKOFF="$STATE_DIR/fail_backoff"       # "streak|retry_epoch" after a failed ping
+CODEX_FAIL_BACKOFF="$STATE_DIR/codex_fail_backoff"
 CLAUDE_PROJECTS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"   # Claude Code session logs
 
 TICK_SECONDS=300   # how often the agent checks whether a fire is due (5 min)
 GRACE_MIN=8        # a fire later than this past its due time = "delayed" (> tick)
+PING_TIMEOUT=180   # seconds before a hung ping is killed
 
 SELF="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 

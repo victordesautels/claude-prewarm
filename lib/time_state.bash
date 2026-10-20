@@ -2,7 +2,7 @@
 to_min() { local h=${1%%:*} m=${1##*:}; echo $((10#$h * 60 + 10#$m)); }
 to_hm()  { printf '%02d:%02d\n' $(( $1 / 60 )) $(( $1 % 60 )); }
 now_min() { to_min "$(date '+%H:%M')"; }
-today_epoch() { date -j -f '%Y-%m-%d %H:%M' "$(date +%F) $1" +%s; }   # epoch of today @ HH:MM
+today_epoch() { date -j -f '%Y-%m-%d %H:%M:%S' "$(date +%F) $1:00" +%s; }   # epoch of today @ HH:MM:00
 date_epoch() { date -j -f '%Y-%m-%d' "$1" +%s 2>/dev/null || true; }
 date_dow() { date -j -f '%Y-%m-%d' "$1" +%w 2>/dev/null || echo 9; }
 epoch_day() { date -r "$1" '+%F'; }
@@ -52,40 +52,43 @@ last_activity() {   # epoch of most recent activity; 0 if none (~10ms for 600 fi
   echo "$m"
 }
 
-# Convert an ISO-8601 UTC timestamp ("2026-07-08T19:46:38.888Z") to epoch seconds.
-iso_to_epoch() {   # $1 = iso string; empty output on failure
-  local iso="${1%%.*}"; iso="${iso%Z}"
-  date -u -j -f '%Y-%m-%dT%H:%M:%S' "$iso" +%s 2>/dev/null || true
-}
-
 # Epoch at which the CURRENT usage window opened (its FIRST message), or 0 if no
 # window is open right now. We must find the window's *first* message, not the last:
 # the window closes exactly INTERVAL after it opens regardless of later messages.
-# So we segment activity into windows — a session that starts >= INTERVAL after the
+# So we replay the last day of activity in order — a message >= INTERVAL after the
 # current anchor opens a NEW window — and report the latest anchor if still open.
-# Sources: the first message of each recent session log + our own last ping. Cheap:
-# one `grep -m1` (stops at the first timestamp) + one date call per recent file.
-# Any parse trouble degrades to "no open window", so we err toward firing, not gaps.
+# Activity is every real model reply in the session logs (synthetic error/limit
+# replies excluded), not just each file's first line: that missed a resumed
+# session and one that ran across a window boundary. Our own pings leave no
+# session log (--no-session-persistence), so they come from FIRE_HISTORY; without
+# them the replay drifts off the real window boundaries. This greps a day of logs
+# (~2s on a heavy day), so callers check the cheap cadence conditions first. Any
+# parse trouble degrades to "no open window", so we err toward firing, not gaps.
 window_anchor() {
-  local interval_s=$(( INTERVAL * 60 )) dir="$CLAUDE_PROJECTS" f iso ep
-  local starts="" lf anchor=0 t nowE
-  lf=$(read_lf); nowE=$(date +%s)
-  if [ -d "$dir" ]; then
-    while IFS= read -r f; do
-      [ -n "$f" ] || continue
-      iso="$(grep -m1 -oE '"timestamp":"[^"]*"' "$f" 2>/dev/null | sed -E 's/.*"timestamp":"([^"]*)".*/\1/')" || true
-      [ -n "$iso" ] || continue
-      ep="$(iso_to_epoch "$iso")"
-      [[ "$ep" =~ ^[0-9]+$ ]] && starts="${starts}${ep}"$'\n'
-    done < <(find "$dir" -type f -name '*.jsonl' -mmin -720 2>/dev/null)
-  fi
-  [ "$lf" -gt 0 ] && starts="${starts}${lf}"$'\n'
-  # walk starts ascending; a start >= anchor+INTERVAL opens a new window
-  while IFS= read -r t; do
-    [ -n "$t" ] || continue
-    { [ "$anchor" -eq 0 ] || [ "$t" -ge $(( anchor + interval_s )) ]; } && anchor="$t"
-  done < <(printf '%s' "$starts" | sort -n)
-  if [ "$anchor" -gt 0 ] && [ "$nowE" -lt $(( anchor + interval_s )) ]; then echo "$anchor"; else echo 0; fi
+  local interval_s=$(( INTERVAL * 60 )) dir="$CLAUDE_PROJECTS" nowE
+  nowE=$(date +%s)
+  {
+    if [ -d "$dir" ]; then
+      find "$dir" -type f -name '*.jsonl' -mmin -1440 -exec env LC_ALL=C grep -h '"type":"assistant"' {} + \
+        | LC_ALL=C grep -v '"model":"<synthetic>"' \
+        | LC_ALL=C grep -oE '"timestamp":"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' || true
+    fi
+    [ -f "$FIRE_HISTORY" ] && cat "$FIRE_HISTORY"
+    read_lf
+  } 2>/dev/null | awk -v cut=$(( nowE - 86400 )) '
+    /^"timestamp":"/ {   # ISO-8601 UTC -> epoch via days-from-civil (BSD awk has no mktime)
+      split(substr($0, 14), p, /[-T:]/)
+      y = p[1] - (p[2] <= 2); mp = (p[2] > 2) ? p[2] - 3 : p[2] + 9
+      era = int(y / 400); yoe = y - era * 400
+      doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + int((153 * mp + 2) / 5) + p[3] - 1
+      e = (era * 146097 + doe - 719468) * 86400 + p[4] * 3600 + p[5] * 60 + p[6]
+      if (e >= cut) print e
+      next
+    }
+    /^[0-9]+$/ { if ($0 + 0 >= cut) print $0 + 0 }' \
+    | sort -n | awk -v iv="$interval_s" -v now="$nowE" '
+    { if (a == 0 || $1 >= a + iv) a = $1 }
+    END { print (a > 0 && now < a + iv) ? a : 0 }' || true
 }
 
 read_limit_until() {   # epoch to pause firing until (usage limit); 0 if none/corrupt
@@ -95,6 +98,12 @@ read_limit_until() {   # epoch to pause firing until (usage limit); 0 if none/co
 }
 read_codex_limit_until() {
   local v; v="$( [ -f "$CODEX_LIMIT_UNTIL" ] && cat "$CODEX_LIMIT_UNTIL" 2>/dev/null || echo 0 )"
+  [[ "$v" =~ ^[0-9]+$ ]] || v=0
+  echo "$v"
+}
+read_fail_until() {   # $1 = backoff file; epoch to hold retries until after a failed ping; 0 if none/corrupt
+  local n v=0
+  [ -f "$1" ] && IFS='|' read -r n v < "$1" 2>/dev/null || true
   [[ "$v" =~ ^[0-9]+$ ]] || v=0
   echo "$v"
 }
