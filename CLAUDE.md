@@ -15,7 +15,7 @@ and dependency-free.
 ## Commands
 
 ```bash
-bash tests/run.sh                     # full test suite (~5s, 260 assertions)
+bash tests/run.sh                     # full test suite (~5s, 266 assertions)
 bash tests/regression.sh              # notifier, CLI routing, and an end-to-end tick under set -euo pipefail
 ./scripts/lint.sh                     # bash -n + shellcheck + dead-code check
 git config core.hooksPath .githooks   # one-time: enable the pre-commit gate
@@ -77,7 +77,10 @@ window is currently open. `window_anchor` replays a day of session-log requests
 (each real reply dated by the user record before it) plus `fire_history` (pings
 run with `--no-session-persistence`, so they leave no log). It takes ~4s, which
 is why it is checked after the cadence, and callers use `window_anchor_cached`,
-which reuses an open window's anchor until that window ends. `fire.bash`
+which reuses an open window's anchor until that window's last 30 minutes.
+Session-log parsing (`session_requests`) relies on Claude Code's real key order;
+re-check it against `jq` on real logs whenever it changes, and keep the test
+fixtures (`_rec` in `tests/run.sh`) in that real order. `fire.bash`
 holds this decision logic; understand it before touching firing behavior.
 
 ### Three independent times

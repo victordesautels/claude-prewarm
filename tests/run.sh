@@ -229,12 +229,37 @@ assert_eq   "spend limit w/o reset time -> epoch 0" 0 \
             "$(detect_limit "You've hit your individual spend limit · run /usage-credits to ask your admin for a higher limit")"
 SPEND_EPOCH="$(detect_limit "You've hit your org's monthly spend limit · run /usage-credits to ask your admin for a higher limit · your weekly limit resets 6am (America/Toronto)")"
 assert_ok   "org spend limit -> reset epoch"     _is_pos_int "$SPEND_EPOCH"
-assert_eq   "  ...parsed as the next 06:00:00"   "06:00:00" "$(date -r "${SPEND_EPOCH:-0}" '+%H:%M:%S')"
+if [ "$(now_min)" -lt 360 ] || [ "$(now_min)" -ge 421 ]; then   # 06:00-07:00 is "just past" (below)
+  assert_eq "  ...parsed as the next 06:00:00"   "06:00:00" "$(date -r "${SPEND_EPOCH:-0}" '+%H:%M:%S')"
+else
+  _pass "  ...next 06:00 (skipped: within an hour after 06:00)"
+fi
 assert_fail "'hit your' without 'limit' is not a limit" detect_limit "Looks like the ping hit your server"
 # a dated reset is that day, not the next occurrence of the clock time
-DATED_EPOCH="$(detect_limit "You've hit your weekly limit · resets Oct 27, 6am (America/Toronto)")"
-assert_eq   "dated reset -> that day"            "Oct 27 06:00" "$(date -r "${DATED_EPOCH:-0}" '+%b %-d %H:%M')"
-assert_ok   "  ...in the future"                 test "${DATED_EPOCH:-0}" -gt "$(date +%s)"
+D10="$(LC_ALL=C date -v+10d '+%b %-d')"
+DATED_EPOCH="$(detect_limit "You've hit your weekly limit · resets $D10, 6am (America/Toronto)")"
+assert_eq   "dated reset -> that day"            "$D10 06:00" "$(LC_ALL=C date -r "${DATED_EPOCH:-0}" '+%b %-d %H:%M')"
+# a date 200 days back is next year's ("Jan 2" read in December)
+D200="$(LC_ALL=C date -v-200d '+%b %-d')"
+assert_eq   "date months past -> next year's"    "$(date -v-200d -v+1y '+%Y-%m-%d')" \
+            "$(date -r "$(parse_reset_epoch "resets $D200, 6am")" '+%Y-%m-%d')"
+# A reset that has only just passed (message rounded down, limit lingering) is
+# retried in 15 minutes — not tomorrow, and not next year (which would pause a year).
+if [ "$(now_min)" -ge 11 ] && [ "$(now_min)" -lt 1430 ]; then
+  JP_NOW=$(date +%s)
+  JP_D="$(parse_reset_epoch "resets $(LC_ALL=C date -v-10M '+%b %-d, %-I:%M%p')")"
+  assert_ok "dated, 10m past -> retry in ~15m"   test $(( JP_D - JP_NOW )) -ge 895 -a $(( JP_D - JP_NOW )) -le 905
+  JP_U="$(parse_reset_epoch "resets $(LC_ALL=C date -v-10M '+%-I:%M%p')")"
+  assert_ok "undated, 10m past -> retry in ~15m" test $(( JP_U - JP_NOW )) -ge 895 -a $(( JP_U - JP_NOW )) -le 905
+else
+  _pass "just-past resets (skipped: around midnight)"
+fi
+if [ "$(now_min)" -ge 121 ]; then
+  assert_eq "undated, 2h past -> tomorrow's"     "$(date -v+1d -v-2H '+%Y-%m-%d %H:%M')" \
+            "$(date -r "$(parse_reset_epoch "resets $(LC_ALL=C date -v-2H '+%-I:%M%p')")" '+%Y-%m-%d %H:%M')"
+else
+  _pass "undated 2h past (skipped: before 02:01)"
+fi
 
 section "today_epoch"
 assert_eq   "lands on the minute (no stray seconds)" 0 "$(( $(today_epoch 06:00) % 60 ))"
@@ -472,11 +497,19 @@ section "time_state: window_anchor"
 rm -f "$LAST_FIRE" "$FIRE_HISTORY" "$CLAUDE_PROJECTS"/*.jsonl
 WA_NOW=$(date +%s)
 _iso() { date -u -r "$(( WA_NOW - $1 ))" '+%Y-%m-%dT%H:%M:%S.000Z'; }   # $1 = seconds ago
-# a session record shaped like Claude Code's: top-level "uuid","timestamp" after
-# the message. $1 = user|assistant  $2 = seconds ago  $3 = model  $4 = extra content
+# Session records in Claude Code's real key order (checked with jq): a user
+# record's "type" comes before its message; an assistant record's message —
+# with its own nested "type":"message" — comes before its "type":"assistant".
+# $1 = user|assistant  $2 = seconds ago  $3 = model  $4 = extra content blocks
 _rec() {
-  printf '{"parentUuid":null,"isSidechain":false,"type":"%s","message":{"role":"%s","model":"%s","content":[%s]},"uuid":"00000000-0000-4000-8000-%012d","timestamp":"%s"}\n' \
-    "$1" "$1" "${3:-claude-opus}" "${4:-}" "$RANDOM" "$(_iso "$2")"
+  local u; u="$(printf '00000000-0000-4000-8000-%012d' "$RANDOM")"
+  if [ "$1" = "user" ]; then
+    printf '{"parentUuid":null,"isSidechain":false,"promptId":"p","type":"user","message":{"role":"user","content":[%s]},"uuid":"%s","timestamp":"%s","userType":"external"}\n' \
+      "${4:-}" "$u" "$(_iso "$2")"
+  else
+    printf '{"parentUuid":null,"isSidechain":false,"message":{"model":"%s","id":"msg_1","type":"message","role":"assistant","content":[%s]},"requestId":"req_1","type":"assistant","uuid":"%s","timestamp":"%s","userType":"external"}\n' \
+      "${3:-claude-opus}" "${4:-}" "$u" "$(_iso "$2")"
+  fi
 }
 _reply() { _rec assistant "$1" "${2:-claude-opus}"; }
 assert_eq "no logs + no last-fire -> anchor 0"     0 "$(INTERVAL=300; window_anchor)"
@@ -539,6 +572,9 @@ assert_eq "  ...reused while it lasts (no rescan)" "$(( WA_NOW - 180 ))" "$(INTE
 assert_eq "  ...not reused under another INTERVAL" 0 "$(INTERVAL=60; window_anchor_cached)"
 printf '%s 18000\n' "$(( WA_NOW - 18060 ))" > "$WINDOW_CACHE"
 assert_eq "  ...expired cache -> rescan"           0 "$(INTERVAL=300; window_anchor_cached)"
+# in its last 30 minutes a late reply may have moved the window earlier: rescan
+printf '%s 18000\n' "$(( WA_NOW - 16500 ))" > "$WINDOW_CACHE"
+assert_eq "  ...last 30 minutes -> rescan"         0 "$(INTERVAL=300; window_anchor_cached)"
 rm -f "$WINDOW_CACHE"
 
 # ---- fire: do_fire outcomes -------------------------------------------------
@@ -558,7 +594,7 @@ assert_ok       "holds the Mac awake for the ping" _wait_for_call caffeinate "-w
 # (The previous tick ran 50m ago: the Mac slept through the boundary. Skipped in
 # the first 70 minutes of the day, when last-fire-1h-ago would be yesterday.)
 section "fire: do_fire delayed recovery"
-if [ "$(now_min)" -ge 70 ]; then
+if [ "$(date -r $(( $(date +%s) - 3600 )) +%F)" = "$(date +%F)" ]; then   # last fire 1h ago is today
   _reset_fire; rm -f "$LAST_RECOVERY"
   printf '%s' "$(( $(date +%s) - 3600 ))" > "$LAST_FIRE"
   ( export STUB_CLAUDE_RC=0 STUB_CLAUDE_OUT="pong"; PREV_TICK=$(( $(date +%s) - 3000 ))
@@ -804,18 +840,27 @@ chmod 644 "$FAIL_BACKOFF"; _reset_fire
 # A 5h boundary due within the next minute is waited for (to 10s past due), not
 # left to the next tick: last_fire is stamped a second or more into its tick.
 section "fire: wait_for_boundary"
-if [ "$(now_min)" -ge 302 ]; then
+# (needs the seeded last fires, ~5h back, to fall on today's date: by epoch, so
+# a DST change overnight can't fool it)
+if [ "$(date -r $(( $(date +%s) - 18060 )) +%F)" = "$(date +%F)" ]; then
   _wfb() { ( export STUB_SLEEP=1; MODE="${2:-standard}"; INTERVAL=300; printf '%s' "$1" > "$LAST_FIRE"; wait_for_boundary ); }
   rm -f "$RT_CALLS/sleep"
   _wfb $(( $(date +%s) - 18000 + 30 ))
   WFB_S="$(cat "$RT_CALLS/sleep" 2>/dev/null)"
   assert_ok       "due in 30s -> waits to 10s past due" test "${WFB_S:-0}" -ge 38 -a "${WFB_S:-0}" -le 40
-  rm -f "$RT_CALLS/sleep"; _wfb $(( $(date +%s) - 18000 + 120 ))
-  assert_fail     "due in 2m -> next tick's job"  test -s "$RT_CALLS/sleep"
+  rm -f "$RT_CALLS/sleep"; _wfb $(( $(date +%s) - 18000 + 180 ))
+  assert_fail     "due in 3m -> next tick's job"  test -s "$RT_CALLS/sleep"
   _wfb $(( $(date +%s) - 18000 - 60 ))
   assert_fail     "already past due+10 -> no wait" test -s "$RT_CALLS/sleep"
   _wfb $(( $(date +%s) - 18000 + 30 )) daily
   assert_fail     "daily mode -> no wait"         test -s "$RT_CALLS/sleep"
+  # after the wait the guardrail is checked again (the wait can cross the cutoff)
+  : > "$LOG"; rm -f "$LAST_SKIP"
+  ( export STUB_SLEEP=1; MODE="standard"; INTERVAL=300; TIME="00:00"; END="$(to_hm $(( $(now_min) + 30 )))"
+    MIN_REMAINING_MIN=60; DAYS="daily"; CALENDAR="none"; SKIP_DATES=""; LOW_BATTERY_SKIP="false"
+    printf '%s' "$(( $(date +%s) - 18000 + 30 ))" > "$LAST_FIRE"; wait_for_boundary; echo fired >> "$LOG" )
+  assert_contains "guardrail rechecked after the wait" "$(cat "$LOG")" "SKIP    all: guardrail"
+  assert_fail     "  ...and the tick ends there"  grep -q fired "$LOG"
   rm -f "$LAST_FIRE"
 else
   _pass "wait_for_boundary (skipped: before 05:02)"
@@ -841,7 +886,7 @@ rm -f "$CLAUDE_PROJECTS"/*.jsonl
 
 # Daily mode: one ping a day even once that ping's window has closed.
 section "fire: cmd_tick daily mode"
-if [ "$(now_min)" -ge 301 ]; then
+if [ $(( $(date +%s) - $(today_epoch 00:00) )) -ge 18060 ]; then   # midnight's window has closed
   _tick_daily() { ( export STUB_CLAUDE_RC=0
     set_valid_config; MODE="daily"; INTERVAL=300; TIME="00:00"; END="23:59"; DAYS="daily"
     CALENDAR="none"; SKIP_DATES=""; LOW_BATTERY_SKIP="false"; MIN_REMAINING_MIN="0"

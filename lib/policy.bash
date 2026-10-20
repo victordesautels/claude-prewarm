@@ -244,22 +244,24 @@ parse_reset_epoch() {   # $1 = message
   [ "$((10#$h))" -ge 0 ] && [ "$((10#$h))" -le 23 ] || return 1
   hm="$(printf '%02d:%02d:00' "$((10#$h))" "$((10#$m))")"
   now=$(date +%s)
-  # A dated reset ("resets Oct 27, 6am", a weekly limit) is that day, not the
-  # next 6am — which would resume, hit the limit, and re-alert every morning.
   if [[ "$scope" =~ $re_date ]]; then
+    # A dated reset ("resets Oct 27, 6am", a weekly limit) is that day, not the
+    # next 6am — which would resume, hit the limit, and re-alert every morning.
     mon=${BASH_REMATCH[1]}; day=$(( 10#${BASH_REMATCH[2]} )); yr=$(date +%Y)
     base="$(LC_ALL=C date -j -f '%b %d %Y %H:%M:%S' "$mon $day $yr $hm" +%s 2>/dev/null)" || return 1
-    if [ "$base" -le "$now" ]; then   # "Jan 2" seen in late December
+    if [ $(( now - base )) -gt $(( 180 * 86400 )) ]; then   # "Jan 2" seen in late December
       base="$(LC_ALL=C date -j -f '%b %d %Y %H:%M:%S' "$mon $day $(( yr + 1 )) $hm" +%s 2>/dev/null)" || return 1
     fi
-    echo "$base"; return 0
+  else
+    base="$(date -j -f '%Y-%m-%d %H:%M:%S' "$(date +%F) $hm" +%s 2>/dev/null)" || return 1
+    # over an hour gone: tomorrow's (parse the date; +86400 is an hour off across DST)
+    if [ $(( now - base )) -gt 3600 ]; then
+      base="$(date -j -f '%Y-%m-%d %H:%M:%S' "$(date -v+1d +%F) $hm" +%s 2>/dev/null)" || return 1
+    fi
   fi
-  base="$(date -j -f '%Y-%m-%d %H:%M:%S' "$(date +%F) $hm" +%s 2>/dev/null)" || return 1
-  # reset is later today or tomorrow; parse tomorrow's date rather than adding
-  # 86400, which lands an hour off across a DST change
-  if [ "$base" -le "$now" ]; then
-    base="$(date -j -f '%Y-%m-%d %H:%M:%S' "$(date -v+1d +%F) $hm" +%s 2>/dev/null)" || return 1
-  fi
+  # A reset that has only just passed (the message rounds down, or the limit
+  # lingers a moment past it) is not a day — or a year — away: look again in 15m.
+  [ "$base" -gt "$now" ] || base=$(( now + 900 ))
   echo "$base"
 }
 # Detect a usage-limit response. On match: echo the reset epoch (0 if unknown) and

@@ -4,6 +4,53 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.10-beta] — 2026-10-20
+
+### Fixed
+- **Window detection saw none of your own Claude Code use in 0.5.9.** It took
+  each record's first `"type"` as its kind, but a real assistant record puts
+  its message, with a nested `"type":"message"`, before its top-level
+  `"type":"assistant"`. Only our own pings counted, so the tool could ping
+  inside a window you had opened and misalign the day. A reply is now read
+  from the `"type":"assistant","uuid","timestamp"` run, which always sits
+  together, and a request from a record whose first type is `"user"`. On
+  today's real logs the result matches a `jq` ground truth exactly (8,008
+  requests). The test fixtures now use Claude Code's real key order; the old
+  ones put `"type"` first, which hid this.
+- `last_fire` and the ping history are stamped when the ping finishes, not
+  before `claude` starts. The window opens when the request reaches the API,
+  which can be tens of seconds in while MCP servers start. Stamping before
+  start could let the next boundary ping land inside the old window and be
+  wasted, leaving no window for up to 5 hours. A boundary is now waited for
+  when it is up to 150s away (was 70s).
+- The cached window anchor is rescanned in the window's last 30 minutes (was
+  15): the slowest reply in two weeks of real logs came 15 minutes after its
+  request.
+- A config that parses but fails to load (`PROMPT=good morning` runs
+  `morning`) is treated like a syntax error rather than killing every command.
+  With such a config, `config set` and `install` refuse to run; before, they
+  overwrote the whole config with defaults, and `install` re-ran the `pmset`
+  wake.
+- An invalid config value (`END=25:00`) now alerts once a day while prewarms
+  are paused, as a broken config does. Before, it only logged an error every
+  tick.
+- A session-log path containing `:` no longer drops that file from window
+  detection.
+- A usage-limit reset time that has only just passed (the message rounds
+  down, or the limit lingers a moment) is retried in 15 minutes. A dated one
+  ("resets Oct 27, 6am" read at 06:00:05) rolled to next year and paused
+  prewarms for a year; an undated one waited until tomorrow. A date is only
+  read as next year's when it is months in the past ("Jan 2" read in December).
+- The cached window anchor is rescanned near its window's end. A reply
+  arriving late for an earlier request (another session's long generation)
+  can move the real window's start, and so its end, earlier.
+- The wait for a boundary that is almost due rechecks the guardrails
+  afterwards, so it cannot ping past `END` or the `MIN_REMAINING_MIN` cutoff.
+- The broken-config alert is sent only once its once-a-day marker is saved;
+  an unsaveable marker no longer means an alert every tick.
+- The boundary-wait and other tests that seed a time hours back now check by
+  epoch that it is still today, which is DST-safe.
+
 ## [0.5.9-beta] — 2026-10-20
 
 ### Fixed

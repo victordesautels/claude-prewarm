@@ -98,21 +98,39 @@ late_note() {  # $1 = late_kind (held|unknown): the log's reason for a late, ale
   if [ "$1" = "held" ]; then echo "window open or skipped"; else echo "first tick, cause unknown"; fi
 }
 
-# A boundary that comes due within the next minute or so is waited for, not left
-# to the next tick. last_fire is stamped a second or more into its tick (after
-# window_anchor), so on launchd's steady 300s phase the tick 5h on checked a hair
-# early and every boundary fired 5 minutes late (e.g. 06:24:19 -> 11:29:19). The
-# wait ends 10s past due: the ping must reach the API after the old window ends,
-# and claude may start a second or two faster than last time.
+# A boundary that comes due within the next couple of minutes is waited for, not
+# left to the next tick. last_fire is stamped when its ping finished — after
+# window_anchor and claude's own run, seconds to a minute into its tick — so on
+# launchd's steady 300s phase the tick 5h on checks too early, and boundaries
+# fired 5 minutes late (e.g. 06:24:19 -> 11:29:19). Stamping at completion keeps
+# the next ping clear of the old window (which opened when that request arrived,
+# before it completed); the wait ends 10s past due for good measure.
 wait_for_boundary() {
   [ "$MODE" = "standard" ] || return 0
   local lf s
   lf=$(read_lf)
   { [ "$lf" -gt 0 ] && [ "$(date -r "$lf" '+%Y%m%d')" = "$(date '+%Y%m%d')" ]; } || return 0
   s=$(( lf + $(mode_interval_min) * 60 + 10 - $(date +%s) ))
-  { [ "$s" -gt 0 ] && [ "$s" -le 70 ]; } || return 0
+  { [ "$s" -gt 0 ] && [ "$s" -le 150 ]; } || return 0
   hold_awake
   sleep "$s"
+  # the wait may have crossed END or the MIN_REMAINING_MIN cutoff: a skip now
+  # ends the tick, for Codex too
+  local skip
+  if skip="$(current_skip_reason)"; then record_skip_once "all" "$skip"; exit 0; fi
+}
+
+# A config the tick cannot use pauses prewarms: logged with its reason, and
+# alerted once a day — only once that day's marker is saved, or the alert would
+# repeat every tick. The alert text is fixed: config values must not reach the
+# AppleScript string notify builds.
+pause_for_config() {  # $1 = reason (for the log)
+  local mark; mark="$(date '+%Y%m%d')|all|$1"
+  grep -qxF "$mark" "$LAST_SKIP" 2>/dev/null && return 0
+  record_skip_once "all" "$1"
+  if grep -qxF "$mark" "$LAST_SKIP" 2>/dev/null; then
+    notify alert "Claude prewarm - config error" "The config can't be used, so prewarms are paused. See: claude-prewarm logs. Fix: claude-prewarm config edit"
+  fi
 }
 
 # Failure alert tail: a retry past the day's last possible prewarm (END less the
@@ -132,7 +150,7 @@ retry_text() {  # $1 = retry HH:MM
 do_fire() {  # $1 = tick | manual
   local mode="${1:-tick}" claude_bin ts nowE win_start win_end out rc tmp
   local lf elapsed today lf_day sched=0 delay=0 delayed=0 kind="" reanchor=1 win_open=0 margs=()
-  local anchor=0 reset_epoch="" step streak retry_at fails=0 fu late=""
+  local anchor=0 reset_epoch="" step streak retry_at fails=0 fu late="" pinged
   local lockdir="$STATE_DIR/fire.lock"
 
   # Guard against overlapping fires (e.g. a hung `claude -p`); auto-clear a stale lock.
@@ -188,6 +206,11 @@ do_fire() {  # $1 = tick | manual
   # window detection) — record_ping tracks our own pings instead.
   tmp="$(mktemp "$STATE_DIR/ping.XXXXXX")"
   if run_with_timeout "$PING_TIMEOUT" "$claude_bin" -p "$PROMPT" --no-session-persistence ${margs[@]+"${margs[@]}"} >"$tmp" 2>&1; then rc=0; else rc=$?; fi
+  # The window opened when the request reached the API — some seconds after
+  # nowE (claude starts its MCP servers first, sometimes for tens of seconds) and
+  # before now. Stamping last_fire now errs late, so the next boundary ping can
+  # never land inside this window and be wasted.
+  pinged=$(date '+%s')
   out="$(cat "$tmp")"; rm -f "$tmp"
   out="${out//$'\n'/ }"
 
@@ -225,8 +248,8 @@ do_fire() {  # $1 = tick | manual
   fi
 
   rm -f "$LIMIT_UNTIL" "$FAIL_BACKOFF"                  # a clean ping means we're unblocked
-  record_ping "$nowE"
-  [ "$reanchor" -eq 1 ] && echo "$nowE" > "$LAST_FIRE"
+  record_ping "$pinged"
+  [ "$reanchor" -eq 1 ] && echo "$pinged" > "$LAST_FIRE"
 
   if [ "$mode" = "manual" ] && [ "$reanchor" -eq 0 ]; then
     local openend; openend="$(date -r "$(( anchor + INTERVAL * 60 ))" '+%H:%M')"
@@ -371,7 +394,10 @@ do_codex_fire() {  # $1 = tick | manual
 # ---- tick: decide whether a fire is due (the self-healing core) --------------
 cmd_tick() {
   note_tick                                  # first: even a bad-config tick shows the Mac was awake
-  ( validate_config ) 2>>"$LOG" || exit 0    # bad on-disk config → log why, don't fire
+  local verr
+  if ! verr="$( ( validate_config ) 2>&1 )"; then   # bad on-disk value → log why, alert once a day, don't fire
+    verr="${verr#error: }"; pause_for_config "invalid config: ${verr%%$'\n'*}"; exit 0
+  fi
   check_wake_ac                              # before the skip exit: evening/overnight ticks land here
   wait_for_time                              # a tick just before TIME waits for it instead of skipping
   local n nowE lu fu clu cfu anchor today clf clf_day skip step

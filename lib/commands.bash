@@ -299,9 +299,11 @@ cmd_config() {
     edit)        local o_t="$TIME" o_w="$WAKE" o_d="$DAYS"
                  cp "$CONFIG" "$CONFIG.bak" 2>/dev/null || true
                  "${EDITOR:-vi}" "$CONFIG"
-                 # parse-check first: sourcing a syntax error would exit before the revert
-                 if [ -f "$CONFIG" ] && ! "$BASH" -n "$CONFIG" 2>/dev/null; then
-                   echo "syntax error in the edit — reverting to previous config."
+                 # parse-check and trial-load first: sourcing a syntax error (or a
+                 # line that runs as a command) would exit before the revert
+                 # shellcheck disable=SC1090
+                 if [ -f "$CONFIG" ] && ! { "$BASH" -n "$CONFIG" && ( source "$CONFIG" ); } >/dev/null 2>&1; then
+                   echo "the edited config does not load — reverting to previous config."
                    [ -f "$CONFIG.bak" ] && mv "$CONFIG.bak" "$CONFIG"
                    exit 2
                  fi

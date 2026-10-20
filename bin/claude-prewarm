@@ -31,7 +31,7 @@
 #
 set -euo pipefail
 
-VERSION="0.5.9-beta"
+VERSION="0.5.10-beta"
 LABEL="com.claude-prewarm"
 AWAKE_LABEL="com.claude-prewarm.awake"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
@@ -89,7 +89,10 @@ mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$HOME/Library/LaunchAgents"
 # every tick silently. A broken config is set aside and handled at dispatch.
 CONFIG_BROKEN=0
 if [ -f "$CONFIG" ]; then
-  if "$BASH" -n "$CONFIG" 2>/dev/null; then
+  # also a trial load in a subshell: a file that parses can still fail when run
+  # (PROMPT=good morning runs `morning`; an unset $VAR trips set -u)
+  # shellcheck disable=SC1090
+  if "$BASH" -n "$CONFIG" 2>/dev/null && ( source "$CONFIG" ) >/dev/null 2>&1; then
     # shellcheck disable=SC1090
     source "$CONFIG"
   else
@@ -138,19 +141,20 @@ if [ $# -eq 0 ] && [ ! -f "$CONFIG" ] && [ -t 0 ] && [ -t 1 ]; then
   exit 0
 fi
 
-# A config bash cannot parse: ticks pause (alerting once a day) rather than ping
-# on defaults; every other command warns and runs on defaults, so `config edit`
-# can repair it.
+# A config that won't load: ticks pause (alerting once a day) rather than ping on
+# defaults. Commands that would save the config refuse — they would overwrite
+# all of it with defaults (install would even re-run the pmset wake). Everything
+# else warns and runs on defaults, so `config edit` can repair it.
 if [ "$CONFIG_BROKEN" = 1 ]; then
-  if [ "${1:-}" = "tick" ]; then
-    note_tick
-    if ! grep -q "^$(date '+%Y%m%d')|all|config has a syntax error" "$LAST_SKIP" 2>/dev/null; then
-      notify alert "Claude prewarm - config error" "The config has a syntax error, so prewarms are paused. Fix it with: claude-prewarm config edit"
-    fi
-    record_skip_once "all" "config has a syntax error"
-    exit 0
-  fi
-  printf '%s\n' "$(yellow "warning: $CONFIG has a syntax error; using defaults. Fix it with: claude-prewarm config edit")" >&2
+  case "${1:-}" in
+    tick) note_tick; pause_for_config "config does not load (syntax or command error)"; exit 0 ;;
+    install|setup|wizard|install-default)
+      die "$CONFIG does not load; installing now would overwrite it with defaults" \
+          "fix it with: claude-prewarm config edit   (or delete it to start over)" ;;
+    config) [ "${2:-}" = "set" ] && die "$CONFIG does not load; setting one key would overwrite the rest with defaults" \
+          "fix it with: claude-prewarm config edit" ;;
+  esac
+  printf '%s\n' "$(yellow "warning: $CONFIG does not load; using defaults. Fix it with: claude-prewarm config edit")" >&2
 fi
 
 case "${1:-help}" in

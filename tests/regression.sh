@@ -292,8 +292,8 @@ calls() { cat "$SB/$1.calls" 2>/dev/null | wc -l | tr -d ' '; }
 last() { tail -n1 "$ST/prewarm.log" 2>/dev/null; }
 nm() { echo $(( 10#$(date +%H) * 60 + 10#$(date +%M) )); }
 hm() { printf '%02d:%02d' $(( $1 / 60 )) $(( $1 % 60 )); }
-reply() {  # an API reply $1 seconds ago in the sandbox session logs, shaped like Claude Code's
-  printf '{"parentUuid":null,"type":"assistant","message":{"model":"claude-opus","content":[]},"uuid":"00000000-0000-4000-8000-000000000001","timestamp":"%s"}\n' \
+reply() {  # an API reply $1 seconds ago in the sandbox session logs, in Claude Code's key order
+  printf '{"parentUuid":null,"isSidechain":false,"message":{"model":"claude-opus","id":"msg_1","type":"message","role":"assistant","content":[]},"requestId":"req_1","type":"assistant","uuid":"00000000-0000-4000-8000-000000000001","timestamp":"%s","userType":"external"}\n' \
     "$(date -u -r "$(( $(date +%s) - $1 ))" '+%Y-%m-%dT%H:%M:%S.000Z')" > "$SB/.claude/projects/p/s.jsonl"
 }
 # expect NAME PATTERN [STUB COUNT]: one tick must exit 0, its last log line must
@@ -375,7 +375,7 @@ else
 fi
 # a boundary due within the minute is waited for (sleep stubbed): the path runs
 # clean under strict mode and asks to sleep until 10s past due
-if [ "$(nm)" -ge 302 ]; then
+if [ "$(date -r $(( $(date +%s) - 18000 )) +%F)" = "$(date +%F)" ]; then   # the seeded last fire is today
   conf 00:00 23:59 0 false; forget; rm -f "$SB/sleep.calls" "$SB/claude.calls"
   printf '%s' "$(( $(date +%s) - 18000 + 30 ))" > "$ST/last_fire"
   export STUB_SLEEP=1
@@ -386,17 +386,37 @@ else
   skip "e2e: boundary-wait path" "before 05:02"
 fi
 
-# A config bash cannot parse: ticks pause and alert once a day instead of dying
-# at startup; other commands warn and run on defaults; `config edit` reverts a
-# broken edit and accepts an untouched legacy MODE=aggressive line.
+# A config that won't load: ticks pause and alert once a day instead of dying at
+# startup; commands that would save the config refuse (they'd overwrite it with
+# defaults); others warn and run on defaults; `config edit` reverts a broken edit
+# and accepts an untouched legacy MODE=aggressive line.
 conf 00:00 23:59 0 false; forget; rm -f "$SB/applet.log" "$SB/claude.calls" "$ST/last_skip"
 printf 'TIME=06:00\nEND=17:00 (oops\n' > "$CFG"
-expect "broken config: tick pauses"        "SKIP    all: config has a syntax error" claude 0
-expect "  ...and stays quiet the next tick" "SKIP    all: config has a syntax error" claude 0
+expect "broken config: tick pauses"        "SKIP    all: config does not load" claude 0
+expect "  ...and stays quiet the next tick" "SKIP    all: config does not load" claude 0
 [ "$(grep -c 'config error' "$SB/applet.log" 2>/dev/null)" = 1 ] && ok "e2e: broken config alerts once" \
   || fail "e2e: broken config alerts once" "$(cat "$SB/applet.log" 2>/dev/null)"
-case "$(run_cli config get)" in *"syntax error"*"END=17:00 (oops"*) ok "e2e: config get warns, still runs";;
+# if the once-a-day marker can't be saved, stay quiet rather than alert every tick
+rm -f "$SB/applet.log" "$ST/last_skip"; mkdir "$ST/last_skip.tmp"
+run_cli tick >/dev/null; run_cli tick >/dev/null
+grep -q 'config error' "$SB/applet.log" 2>/dev/null && fail "e2e: unsaveable marker -> no alert storm" \
+  || ok "e2e: unsaveable marker -> no alert storm"
+rmdir "$ST/last_skip.tmp"
+case "$(run_cli config get)" in *"does not load"*"END=17:00 (oops"*) ok "e2e: config get warns, still runs";;
   *) fail "e2e: config get warns, still runs" "$(run_cli config get)";; esac
+run_cli config set NOTIFY false >/dev/null && fail "e2e: config set refuses a broken config" \
+  || { grep -q 'END=17:00 (oops' "$CFG" && ok "e2e: config set refuses a broken config" || fail "e2e: config set refuses a broken config" "$(cat "$CFG")"; }
+run_cli install-default --notify delayed >/dev/null && fail "e2e: install refuses a broken config" \
+  || { grep -q 'END=17:00 (oops' "$CFG" && ok "e2e: install refuses a broken config" || fail "e2e: install refuses a broken config" "$(cat "$CFG")"; }
+# parses, but a line runs as a command: still "does not load"
+rm -f "$ST/last_skip"; printf 'TIME=00:00\nEND=23:59\nPROMPT=good morning\n' > "$CFG"
+expect "unquoted value (runs a command) -> pauses" "SKIP    all: config does not load" claude 0
+# loads, but a value is invalid: pauses with the reason, alerts once a day
+rm -f "$ST/last_skip" "$SB/applet.log"; conf 00:00 23:59 0 false; printf 'END=25:00\n' >> "$CFG"
+expect "invalid value -> pauses with the reason"   "SKIP    all: invalid config: END must be HH:MM" claude 0
+run_cli tick >/dev/null
+[ "$(grep -c 'config error' "$SB/applet.log" 2>/dev/null)" = 1 ] && ok "e2e: invalid value alerts once" \
+  || fail "e2e: invalid value alerts once" "$(cat "$SB/applet.log" 2>/dev/null)"
 printf '#!/bin/bash\nprintf "%%b" "$EDIT_TO" > "$1"\n' > "$SB/bin/fake-editor"; chmod +x "$SB/bin/fake-editor"
 conf 00:00 23:59 0 false
 EDIT_TO='TIME=06:00\nEND=17:00 (oops\n' EDITOR="$SB/bin/fake-editor" run_cli config edit >/dev/null; erc=$?
