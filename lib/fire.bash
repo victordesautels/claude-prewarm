@@ -45,7 +45,9 @@ do_fire() {  # $1 = tick | manual
 
   [ -n "$MODEL" ] && margs=(--model "$MODEL")
   ts="$(date '+%Y-%m-%d %H:%M:%S')"
-  if out="$("$claude_bin" -p "$PROMPT" ${margs[@]+"${margs[@]}"} 2>&1)"; then rc=0; else rc=$?; fi
+  # --no-session-persistence: keep the ping out of $CLAUDE_PROJECTS (resume list,
+  # window detection) — our own pings are already counted via last_fire.
+  if out="$("$claude_bin" -p "$PROMPT" --no-session-persistence ${margs[@]+"${margs[@]}"} 2>&1)"; then rc=0; else rc=$?; fi
   out="${out//$'\n'/ }"
 
   # Usage limit hit? Back off — pinging a maxed-out account just wastes fires and

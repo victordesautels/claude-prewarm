@@ -438,6 +438,7 @@ _reset_fire
 assert_ok       "records a positive last_fire"    _is_pos_int "$(read_lf)"
 assert_contains "logs an ok anchor fire"          "$(_logtail)" "ok  anchor"
 assert_contains "invokes claude with -p"          "$(cat "$RT_CALLS/claude" 2>/dev/null)" "-p"
+assert_contains "ping skips session persistence"  "$(cat "$RT_CALLS/claude" 2>/dev/null)" "--no-session-persistence"
 
 # A boundary fire that's overdue (Mac was asleep) must log DELAYED and record
 # recovery. Seed last-fire 1h ago; with INTERVAL=5 the boundary was due ~55m ago.
@@ -480,6 +481,7 @@ _reset_codex
 assert_ok       "records a positive codex last_fire" _is_pos_int "$(read_codex_lf)"
 assert_contains "logs a codex fire"                  "$(_logtail)" "codex"
 assert_contains "invokes 'codex exec'"               "$(cat "$RT_CALLS/codex" 2>/dev/null)" "exec"
+assert_contains "codex ping is ephemeral"            "$(cat "$RT_CALLS/codex" 2>/dev/null)" "--ephemeral"
 
 section "fire: do_codex_fire usage-limit backoff"
 _reset_codex

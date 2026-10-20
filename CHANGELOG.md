@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2-beta] — 2026-10-20
+
+### Changed
+- The Claude ping runs with `--no-session-persistence`, so it no longer leaves a
+  session log in `~/.claude/projects` (or clutters `claude --resume`). Window
+  detection is unaffected: our own pings are tracked via `last_fire`.
+
 ## [0.4.2-beta] — 2026-07-09
 
 ### Added
