@@ -165,6 +165,7 @@ record_ping() {  # $1 = epoch
 record_failure() {  # $1 = backoff file  $2 = now epoch
   local f="$1" nowE="$2" n=0 retry=0 last=0 delay
   [ -f "$f" ] && IFS='|' read -r n retry last < "$f" 2>/dev/null || true
+  [[ "$last" =~ ^[0-9]+$ ]] || last="$retry"            # 0.5.3 wrote "streak|retry"
   { [[ "$n" =~ ^[0-9]+$ ]] && [[ "$last" =~ ^[0-9]+$ ]]; } || { n=0; last=0; }
   [ "$last" -gt 0 ] && [ "$(epoch_day "$last")" != "$(epoch_day "$nowE")" ] && n=0
   n=$(( n + 1 ))

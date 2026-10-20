@@ -259,36 +259,108 @@ rm -rf "$SB"
 
 # ---- tick end to end: the real entrypoint under set -euo pipefail -------------
 # tests/run.sh sources the libs without errexit; this drives bin/claude-prewarm
-# itself, so a failing `a && b` or pipefail slip would abort here. Stub claude
-# fails while $SB/fail exists; stub caffeinate/pmset keep the real ones out.
+# itself, where a failing `a && b` or a pipefail slip aborts the tick. Every
+# tick's exit status is asserted, so an abort fails the check rather than
+# skipping it. Stubs keep the real claude/codex/caffeinate/pmset/launchctl out;
+# CLAUDE_CONFIG_DIR is dropped so no real session logs are read. A stub fails
+# while $SB/<name>.fail exists.
 
 sandbox
-mkdir -p "$SB/.config/claude-prewarm"
-printf 'TIME=00:00\nEND=23:59\nDAYS=daily\nMODE=standard\nMIN_REMAINING_MIN=0\nWAKE=false\nLOW_BATTERY_SKIP=false\nCALENDAR=none\n' \
-  > "$SB/.config/claude-prewarm/config"
-cat > "$SB/bin/claude" <<EOF
+CFG="$SB/.config/claude-prewarm/config"; ST="$SB/.local/state/claude-prewarm"
+mkdir -p "$SB/.config/claude-prewarm" "$SB/.claude/projects/p"
+conf() {  # $1 = TIME  $2 = END  $3 = MIN_REMAINING_MIN  $4 = CODEX
+  printf 'TIME=%s\nEND=%s\nDAYS=daily\nMODE=standard\nMIN_REMAINING_MIN=%s\nWAKE=false\nLOW_BATTERY_SKIP=false\nCALENDAR=none\nCODEX=%s\nCODEX_PROMPT=ping\n' \
+    "$1" "$2" "$3" "$4" > "$CFG"
+}
+for t in claude codex; do
+  cat > "$SB/bin/$t" <<EOF
 #!/bin/bash
-echo x >> "$SB/claude.calls"
-[ -f "$SB/fail" ] && { echo "Failed to authenticate"; exit 1; }
+echo x >> "$SB/$t.calls"
+[ -f "$SB/$t.fail" ] && { echo "Failed to authenticate"; exit 1; }
 echo pong
 EOF
-printf '#!/bin/bash\nexit 0\n' > "$SB/bin/caffeinate"; printf '#!/bin/bash\nexit 0\n' > "$SB/bin/pmset"
-chmod +x "$SB/bin/claude" "$SB/bin/caffeinate" "$SB/bin/pmset"
-ST="$SB/.local/state/claude-prewarm"
-tick() { HOME="$SB" PATH="$SB/bin:$PATH" CLAUDE_PREWARM_LIB_DIR="$LIB" bash "$BIN" tick </dev/null >/dev/null 2>&1; }
-calls() { wc -l < "$SB/claude.calls" 2>/dev/null | tr -d ' ' || echo 0; }
+done
+# sleep stays real (the ping watchdog uses it) unless STUB_SLEEP is set
+printf '#!/bin/bash\n[ -n "${STUB_SLEEP:-}" ] && { echo "$*" >> "%s/sleep.calls"; exit 0; }\nexec /bin/sleep "$@"\n' "$SB" > "$SB/bin/sleep"
+for t in caffeinate pmset; do printf '#!/bin/bash\nexit 0\n' > "$SB/bin/$t"; done
+printf '#!/bin/bash\nexit 1\n' > "$SB/bin/launchctl"
+chmod +x "$SB/bin/"*
+run_cli() { env -u CLAUDE_CONFIG_DIR HOME="$SB" PATH="$SB/bin:$PATH" CLAUDE_PREWARM_LIB_DIR="$LIB" bash "$BIN" "$@" </dev/null 2>&1; }
+calls() { cat "$SB/$1.calls" 2>/dev/null | wc -l | tr -d ' '; }
 last() { tail -n1 "$ST/prewarm.log" 2>/dev/null; }
+nm() { echo $(( 10#$(date +%H) * 60 + 10#$(date +%M) )); }
+hm() { printf '%02d:%02d' $(( $1 / 60 )) $(( $1 % 60 )); }
+reply() {  # an API reply $1 seconds ago in the sandbox session logs
+  printf '{"type":"assistant","timestamp":"%s","message":{"model":"claude-opus"}}\n' \
+    "$(date -u -r "$(( $(date +%s) - $1 ))" '+%Y-%m-%dT%H:%M:%S.000Z')" > "$SB/.claude/projects/p/s.jsonl"
+}
+# expect NAME PATTERN [STUB COUNT]: one tick must exit 0, its last log line must
+# contain PATTERN, and (if given) STUB must have been called COUNT times in all
+expect() {
+  local rc=0
+  run_cli tick >/dev/null || rc=$?
+  if [ "$rc" -eq 0 ] && case "$(last)" in *"$2"*) true;; *) false;; esac \
+     && { [ -z "${3:-}" ] || [ "$(calls "$3")" = "$4" ]; }; then
+    ok "e2e: $1"
+  else
+    fail "e2e: $1" "rc=$rc ${3:+$3 calls=$(calls "$3")} last: $(last)"
+  fi
+}
 
-tick && case "$(last)" in *"ok  anchor"*) ok "e2e: first tick fires";; *) fail "e2e: first tick fires" "$(last)";; esac
-tick && [ "$(calls)" = 1 ] && ok "e2e: window open -> no second ping" || fail "e2e: window open -> no second ping" "calls=$(calls)"
-rm -f "$ST/last_fire" "$ST/fire_history"; : > "$SB/fail"
-tick && case "$(last)" in *"FAILED  rc=1  retry"*) ok "e2e: failure backs off";; *) fail "e2e: failure backs off" "$(last)";; esac
+conf 00:00 23:59 0 false
+expect "first tick fires"                  "ok  anchor" claude 1
+expect "cadence not due -> no second ping" "ok  anchor" claude 1
+# due by cadence (last fire yesterday), but your own reply 3m ago opened a window
+printf '%s' "$(( $(date +%s) - 86400 ))" > "$ST/last_fire"; rm -f "$ST/fire_history"; reply 180
+expect "open window (session log) -> no ping" "" claude 1
+rm -f "$SB/.claude/projects/p/s.jsonl"; : > "$SB/claude.fail"
+expect "failure backs off"                 "FAILED  rc=1  retry" claude 2
 grep -q 'FAILED' "$SB/applet.log" 2>/dev/null && ok "e2e: first failure notifies" || fail "e2e: first failure notifies"
-tick && [ "$(calls)" = 2 ] && ok "e2e: back-off -> no retry yet" || fail "e2e: back-off -> no retry yet" "calls=$(calls) $(last)"
-now=$(date +%s); printf '1|%s|%s\n' "$(( now - 60 ))" "$(( now - 960 ))" > "$ST/fail_backoff"; rm -f "$SB/fail"
-tick && case "$(last)" in *"recovered after 1 failed"*) ok "e2e: retry reads as recovered";; *) fail "e2e: retry reads as recovered" "$(last)";; esac
-json="$(HOME="$SB" PATH="$SB/bin:$PATH" CLAUDE_PREWARM_LIB_DIR="$LIB" bash "$BIN" status --json 2>&1)"
-case "$json" in *'"retry_at":null'*) ok "e2e: status --json clears retry_at";; *) fail "e2e: status --json clears retry_at" "$json";; esac
+expect "back-off -> no retry yet"          "SKIP    claude: retrying failed ping" claude 2
+rm -f "$SB/claude.fail"
+if [ "$(nm)" -ge 2 ]; then   # now-60 must still be today
+  now=$(date +%s); printf '1|%s|%s\n' "$(( now - 60 ))" "$(( now - 960 ))" > "$ST/fail_backoff"
+  expect "retry reads as recovered"        "recovered after 1 failed"
+else
+  skip "e2e: retry reads as recovered" "first minutes of the day"
+fi
+case "$(run_cli status --json)" in
+  *'"retry_at":null'*) ok "e2e: status --json clears retry_at";;
+  *) fail "e2e: status --json clears retry_at" "$(run_cli status --json)";;
+esac
+
+rm -f "$ST/last_fire" "$ST/fire_history" "$ST/fail_backoff" "$SB/claude.calls"
+printf '%s' "$(( $(date +%s) + 3600 ))" > "$ST/limit_until"
+expect "limit pause -> skip"               "SKIP    claude: usage limit until" claude 0
+rm -f "$ST/limit_until"
+if [ "$(nm)" -lt 1400 ]; then
+  conf 00:00 "$(hm $(( $(nm) + 30 )))" 60 false
+  expect "guardrail -> skip"               "SKIP    all: guardrail" claude 0
+else
+  skip "e2e: guardrail -> skip" "too close to midnight"
+fi
+
+conf 00:00 23:59 0 true
+printf '%s' "$(date +%s)" > "$ST/last_fire"                   # claude not due
+expect "codex fires"                       "ok  codex anchor" codex 1
+rm -f "$ST/codex_last_fire"; : > "$SB/codex.fail"
+expect "codex failure backs off"           "CODEX FAILED  rc=1  retry" codex 2
+expect "codex back-off -> skip"            "SKIP    codex: retrying failed ping" codex 2
+rm -f "$SB/codex.fail" "$ST/codex_fail_backoff"
+
+# a tick two minutes before TIME waits for it (sleep stubbed), then — still
+# before TIME by the real clock — skips as outside active hours
+if [ "$(nm)" -ge 1 ] && [ "$(nm)" -lt 1430 ]; then
+  conf "$(hm $(( $(nm) + 2 )))" 23:59 0 false
+  rm -f "$ST/last_fire" "$ST/fire_history" "$SB/sleep.calls"
+  export STUB_SLEEP=1
+  expect "wait_for_time path runs clean"   "SKIP    all: outside active hours"
+  unset STUB_SLEEP
+  grep -q 'WAIT ' "$ST/prewarm.log" && [ -s "$SB/sleep.calls" ] \
+    && ok "e2e: waited for TIME" || fail "e2e: waited for TIME" "$(tail -n3 "$ST/prewarm.log")"
+else
+  skip "e2e: wait_for_time path" "too close to midnight"
+fi
 rm -rf "$SB"
 
 # ---- notifier source: env-first, UTF-8-safe ------------------------------------

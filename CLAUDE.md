@@ -15,7 +15,7 @@ and dependency-free.
 ## Commands
 
 ```bash
-bash tests/run.sh                     # full test suite (~4s, 212 assertions)
+bash tests/run.sh                     # full test suite (~4s, 226 assertions)
 bash tests/regression.sh              # notifier, CLI routing, and an end-to-end tick under set -euo pipefail
 ./scripts/lint.sh                     # bash -n + shellcheck + dead-code check
 git config core.hooksPath .githooks   # one-time: enable the pre-commit gate
@@ -89,7 +89,7 @@ legacy `KEEPALIVE` boolean for backward compat — see the mapping in both
 ### State and config (never hardcode these paths — use the globals)
 
 - Config: `~/.config/claude-prewarm/config` (sourced shell assignments).
-- State: `~/.local/state/claude-prewarm/` — `last_fire`, `fire_history`,
+- State: `~/.local/state/claude-prewarm/` — `last_fire`, `last_tick`, `fire_history`,
   `limit_until`, `fail_backoff`, `codex_last_fire`, `codex_fail_backoff`,
   `wake_set`, `last_skip`, `last_recovery`, logs.
 - Claude session logs it reads to detect an already-open window:

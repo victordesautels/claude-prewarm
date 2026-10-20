@@ -296,6 +296,7 @@ LAST_RECOVERY="$STATE_DIR/last_recovery"
 WAKE_MARK="$STATE_DIR/wake_set"
 WAKE_AC_WARNED="$STATE_DIR/wake_ac_warned"
 FIRE_HISTORY="$STATE_DIR/fire_history"
+LAST_TICK="$STATE_DIR/last_tick"
 FAIL_BACKOFF="$STATE_DIR/fail_backoff"
 CODEX_FAIL_BACKOFF="$STATE_DIR/codex_fail_backoff"
 CLAUDE_PROJECTS="$RT_SANDBOX/claude_projects"; mkdir -p "$CLAUDE_PROJECTS"  # empty => no open window
@@ -310,8 +311,9 @@ _mkstub() {  # $1=name  $2=body (single-quoted; $RT_* expand at stub runtime, no
   { printf '#!/usr/bin/env bash\n'; printf '%s\n' "$2"; } > "$STUB_BIN/$1"
   chmod +x "$STUB_BIN/$1"
 }
-# claude: $STUB_CLAUDE_HANG seconds of silence first simulates a hung ping.
-_mkstub claude     'echo "$@" >> "$RT_CALLS/claude"; [ -n "${STUB_CLAUDE_HANG:-}" ] && sleep "$STUB_CLAUDE_HANG"; printf "%s" "${STUB_CLAUDE_OUT:-pong}"; exit "${STUB_CLAUDE_RC:-0}"'
+# claude: $STUB_CLAUDE_HANG turns it into a silent sleep that long — a hung ping
+# (exec, so the watchdog's TERM leaves no orphaned child).
+_mkstub claude     'echo "$@" >> "$RT_CALLS/claude"; [ -n "${STUB_CLAUDE_HANG:-}" ] && exec /bin/sleep "$STUB_CLAUDE_HANG"; printf "%s" "${STUB_CLAUDE_OUT:-pong}"; exit "${STUB_CLAUDE_RC:-0}"'
 _mkstub codex      'echo "$@" >> "$RT_CALLS/codex";  printf "%s" "${STUB_CODEX_OUT:-pong}";  exit "${STUB_CODEX_RC:-0}"'
 _mkstub caffeinate 'echo "$@" >> "$RT_CALLS/caffeinate"; exit 0'
 # sleep: real unless $STUB_SLEEP is set (then it only records), so wait_for_time
@@ -342,7 +344,7 @@ exit 0'
 PATH="$STUB_BIN:$PATH"; export PATH
 
 _logtail()    { tail -n1 "$LOG" 2>/dev/null; }
-_reset_fire() { : > "$LOG"; rm -f "$LAST_FIRE" "$LIMIT_UNTIL" "$LAST_SKIP" "$FIRE_HISTORY" "$FAIL_BACKOFF" "$RT_CALLS/claude"; rm -rf "$STATE_DIR/fire.lock"; }
+_reset_fire() { : > "$LOG"; rm -f "$LAST_FIRE" "$LIMIT_UNTIL" "$LAST_SKIP" "$FIRE_HISTORY" "$FAIL_BACKOFF" "$RT_CALLS/claude"; rm -rf "$STATE_DIR/fire.lock"; PREV_TICK=0; }
 _reset_codex(){ : > "$LOG"; rm -f "$CODEX_LAST_FIRE" "$CODEX_LIMIT_UNTIL" "$CODEX_FAIL_BACKOFF" "$RT_CALLS/codex"; rm -rf "$STATE_DIR/codex.fire.lock"; }
 # hold_awake starts caffeinate in the background: give the stub a moment to log.
 _wait_for_call() {  # $1 = stub name, $2 = needle
@@ -536,6 +538,17 @@ printf '3|%s|%s\n' "$(( FB_NOW + 172800 ))" "$FB_NOW" > "$FAIL_BACKOFF"; _fail_f
 assert_eq       "retry on another day keeps today's streak" 4 "$(cut -d'|' -f1 "$FAIL_BACKOFF")"
 printf '2|123\n' > "$FAIL_BACKOFF"
 assert_eq       "reads a 0.5.3 two-field back-off" 123 "$(read_fail_until "$FAIL_BACKOFF")"
+printf '2|%s\n' "$FB_NOW" > "$FAIL_BACKOFF"; _fail_fire
+assert_eq       "  ...and continues its streak"   3 "$(read_fail_streak "$FAIL_BACKOFF")"
+rm -f "$RT_CALLS/osascript"
+( export STUB_CLAUDE_RC=7 STUB_CLAUDE_OUT="boom"
+  MODE="standard"; INTERVAL=300; TIME="00:00"; END="23:59"; NOTIFY="true"; do_fire manual )
+assert_contains "manual failure logs 'manual'"    "$(_logtail)" "FAILED  rc=7  manual"
+assert_eq       "manual failure leaves the schedule's back-off alone" 3 "$(read_fail_streak "$FAIL_BACKOFF")"
+assert_contains "manual failure still notifies"   "$(cat "$RT_CALLS/osascript" 2>/dev/null)" "Manual ping failed"
+assert_eq       "retry inside hours -> 'Retrying at'" "Retrying at 10:15." "$(TIME=06:00; END=18:00; retry_text 10:15)"
+assert_eq       "retry after END -> no retry today"   "No retry today (after 18:00)." "$(TIME=06:00; END=18:00; retry_text 18:15)"
+assert_eq       "retry past midnight -> no retry today" "No retry today (after 18:00)." "$(TIME=06:00; END=18:00; retry_text 00:05)"
 ( export STUB_CLAUDE_RC=0 STUB_CLAUDE_OUT="pong"
   MODE="standard"; INTERVAL=300; TIME="$(date +%H:%M)"; END="23:59"; NOTIFY="false"; do_fire tick )
 assert_fail     "a clean ping clears the back-off" test -f "$FAIL_BACKOFF"
@@ -554,6 +567,32 @@ if [ "$(now_min)" -ge 20 ]; then
 else
   _pass "retry recovered (skipped: first minutes of day)"
 fi
+
+# Late against TIME, but the previous tick ran 5 minutes ago: an open window or a
+# guardrail held the fire back, so no "Mac was asleep" alert.
+section "fire: do_fire late but ticks ran on -> held, not asleep"
+if [ "$(now_min)" -ge 60 ]; then
+  _reset_fire; rm -f "$RT_CALLS/osascript" "$LAST_RECOVERY"
+  ( export STUB_CLAUDE_RC=0; PREV_TICK=$(( $(date +%s) - 300 ))
+    MODE="standard"; INTERVAL=300; TIME="$(to_hm $(( $(now_min) - 45 )))"; END="23:59"; NOTIFY="delayed"; do_fire tick )
+  assert_contains "logs 'held +45m'"              "$(_logtail)" "held +4"
+  assert_fail     "no alert (routine notice only)" test -s "$RT_CALLS/osascript"
+  assert_fail     "records no sleep recovery"     test -s "$LAST_RECOVERY"
+  _reset_fire
+  ( export STUB_CLAUDE_RC=0; PREV_TICK=$(( $(date +%s) - 3000 ))
+    MODE="standard"; INTERVAL=300; TIME="$(to_hm $(( $(now_min) - 45 )))"; END="23:59"; NOTIFY="false"; do_fire tick )
+  assert_contains "ticks stopped -> DELAYED"      "$(_logtail)" "DELAYED"
+else
+  _pass "held vs asleep (skipped: first hour of day)"
+fi
+
+section "fire: note_tick"
+rm -f "$LAST_TICK"; note_tick
+assert_eq       "no previous tick -> 0"           0 "$PREV_TICK"
+assert_ok       "stamps this tick"                _is_pos_int "$(cat "$LAST_TICK")"
+printf '%s' 1234 > "$LAST_TICK"; note_tick
+assert_eq       "reads the previous tick"         1234 "$PREV_TICK"
+PREV_TICK=0
 
 section "fire: do_fire kills a hung ping"
 _reset_fire

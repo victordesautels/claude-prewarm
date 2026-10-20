@@ -4,6 +4,27 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.5-beta] — 2026-10-20
+
+### Fixed
+- A ping that fails instantly (e.g. `claude` missing) no longer leaves bash's
+  "Terminated: 15" notice in the log or on the terminal. The timeout watchdog
+  is now reaped before its marker is read, and it stops its own sleeps with
+  KILL, so a cancelled watchdog never leaves a stray `sleep` running.
+- A failed `now` no longer sets the schedule's retry back-off. It could push
+  the next scheduled ping up to 15 minutes late. A failure alert whose retry
+  falls after `END` says "No retry today" instead of a time that never comes.
+- A late ping says "Mac was asleep" only if the ticks actually stopped. One
+  held back by an open window or a guardrail, while ticks kept running, is
+  logged as `held` with a routine notice. Each tick stamps `last_tick` for
+  this.
+- Upgrading from 0.5.3 mid-failure-streak continues the streak instead of
+  restarting it with a fresh alert.
+- The end-to-end tests assert every tick's exit status, so an errexit abort
+  fails them instead of skipping the check. They now also cover window
+  detection, the pre-`TIME` wait, Codex, and the skip paths. They stub
+  `launchctl` and ignore `CLAUDE_CONFIG_DIR`.
+
 ## [0.5.4-beta] — 2026-10-20
 
 ### Fixed

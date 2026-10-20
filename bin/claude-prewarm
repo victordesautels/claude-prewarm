@@ -31,7 +31,7 @@
 #
 set -euo pipefail
 
-VERSION="0.5.4-beta"
+VERSION="0.5.5-beta"
 LABEL="com.claude-prewarm"
 AWAKE_LABEL="com.claude-prewarm.awake"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
@@ -49,6 +49,7 @@ LAST_SKIP="$STATE_DIR/last_skip"
 LAST_RECOVERY="$STATE_DIR/last_recovery"
 WAKE_AC_WARNED="$STATE_DIR/wake_ac_warned"   # target date already warned about (wake needs AC)
 FIRE_HISTORY="$STATE_DIR/fire_history"       # epochs of the last day's pings (they leave no session log)
+LAST_TICK="$STATE_DIR/last_tick"             # epoch of the latest tick (was the Mac asleep before a late fire?)
 FAIL_BACKOFF="$STATE_DIR/fail_backoff"       # "streak|retry_epoch" after a failed ping
 CODEX_FAIL_BACKOFF="$STATE_DIR/codex_fail_backoff"
 CLAUDE_PROJECTS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"   # Claude Code session logs
