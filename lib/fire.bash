@@ -81,11 +81,11 @@ wait_for_time() {
 note_tick() {
   local v; v="$(cat "$LAST_TICK" 2>/dev/null || true)"
   if [[ "$v" =~ ^[0-9]+$ ]]; then PREV_TICK="$v"; else PREV_TICK=0; fi
-  date +%s > "$LAST_TICK"
+  { date +%s > "$LAST_TICK"; } 2>/dev/null || true   # unwritable: lose the hint, not the tick
 }
 late_kind() {  # $1 = now epoch; prints held (ticks ran on), asleep, or unknown
   if [ "${PREV_TICK:-0}" -eq 0 ]; then
-    echo unknown     # first tick since install or upgrade: no evidence of sleep
+    echo unknown     # first tick since install/upgrade (uninstall clears last_tick): no evidence of sleep
   elif [ $(( $1 - PREV_TICK )) -le $(( GRACE_MIN * 60 )) ]; then
     echo held
   else
@@ -195,7 +195,7 @@ do_fire() {  # $1 = tick | manual
     return 0
   fi
   if [ "$rc" -ne 0 ]; then
-    streak=$(record_failure "$FAIL_BACKOFF" "$nowE")
+    streak=$(record_failure "$FAIL_BACKOFF" "${TICK_NOW:-$nowE}")
     retry_at="$(date -r "$(read_fail_until "$FAIL_BACKOFF")" '+%H:%M')"
     printf '%s  FAILED  rc=%s  retry %s  %s\n' "$ts" "$rc" "$retry_at" "${out:0:140}" >> "$LOG"
     if [ "$streak" -eq 1 ]; then
@@ -309,7 +309,7 @@ do_codex_fire() {  # $1 = tick | manual
     return 0
   fi
   if [ "$rc" -ne 0 ]; then
-    streak=$(record_failure "$CODEX_FAIL_BACKOFF" "$nowE")
+    streak=$(record_failure "$CODEX_FAIL_BACKOFF" "${TICK_NOW:-$nowE}")
     retry_at="$(date -r "$(read_fail_until "$CODEX_FAIL_BACKOFF")" '+%H:%M')"
     printf '%s  CODEX FAILED  rc=%s  retry %s  %s\n' "$ts" "$rc" "$retry_at" "${out:0:140}" >> "$LOG"
     if [ "$streak" -eq 1 ]; then
@@ -347,12 +347,17 @@ do_codex_fire() {  # $1 = tick | manual
 
 # ---- tick: decide whether a fire is due (the self-healing core) --------------
 cmd_tick() {
+  note_tick                                  # first: even a bad-config tick shows the Mac was awake
   ( validate_config ) 2>>"$LOG" || exit 0    # bad on-disk config → log why, don't fire
   check_wake_ac                              # before the skip exit: evening/overnight ticks land here
-  note_tick                                  # so a late fire can tell asleep from held back
   wait_for_time                              # a tick just before TIME waits for it instead of skipping
   local n nowE lu fu clu cfu anchor today clf clf_day skip step
   n=$(now_min); nowE=$(date '+%s')
+  # The tick's reference time: a failure's retry is stamped from it, and a later
+  # tick checks it at the same point, so the seconds window_anchor and the
+  # Claude ping spend (minutes, for a ping that times out) before Codex's turn
+  # never push a retry past the tick meant to run it.
+  TICK_NOW="$nowE"
   today=$(date '+%Y%m%d')
   step=$(mode_interval_min)
   if skip="$(current_skip_reason)"; then
@@ -363,7 +368,7 @@ cmd_tick() {
   lu=$(read_limit_until); fu=$(read_fail_until "$FAIL_BACKOFF")
   if [ "$lu" -gt "$nowE" ]; then
     record_skip_once "claude" "usage limit until $(date -r "$lu" '+%H:%M')"
-  elif [ "$fu" -gt "$nowE" ]; then
+  elif retry_pending "$FAIL_BACKOFF" "$nowE"; then
     record_skip_once "claude" "retrying failed ping at $(date -r "$fu" '+%H:%M')"
   elif claude_due "$nowE"; then
     # Cadence first: window_anchor greps a day of session logs, so only look for
@@ -377,7 +382,7 @@ cmd_tick() {
     clu=$(read_codex_limit_until); cfu=$(read_fail_until "$CODEX_FAIL_BACKOFF")
     if [ "$clu" -gt "$nowE" ]; then
       record_skip_once "codex" "usage limit until $(date -r "$clu" '+%H:%M')"
-    elif [ "$cfu" -gt "$nowE" ]; then
+    elif retry_pending "$CODEX_FAIL_BACKOFF" "$nowE"; then
       record_skip_once "codex" "retrying failed ping at $(date -r "$cfu" '+%H:%M')"
     else
       clf=$(read_codex_lf)

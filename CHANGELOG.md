@@ -4,6 +4,28 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.8-beta] — 2026-10-20
+
+### Fixed
+- The log is no longer merged into window detection once `fire_history`
+  exists. This reverts 0.5.7's always-merge. Log stamps are local time with
+  no UTC offset, so a shell with another `TZ`, travel, or the fall-back hour
+  read them back hours off. The phantom pings that produced could leave a
+  7-hour gap. The log now only stands in until `fire_history` exists, and
+  the first ping imports it once.
+- Retries are judged with a minute of slack, stamped from the tick's start
+  rather than rounded. 0.5.7's rounding still missed when the minute rolled
+  over mid-tick. Codex's retry was stamped after Claude's ping, which can take
+  minutes, so it ran a tick late far more often; it now uses the same tick time.
+- `uninstall` forgets `last_tick`, and every tick records it before config
+  validation. A reinstall days later, or a stretch of invalid config, no longer
+  reads as a sleeping Mac.
+- An unwritable `last_tick` or back-off file no longer aborts every tick
+  under `set -e`.
+- The skip dedupe treats "only 56m left" and "only 6m left" as one reason.
+- Tests that build `TIME` from the wall clock skip themselves when that time is
+  not really N minutes away: across a DST change, and around midnight.
+
 ## [0.5.7-beta] — 2026-10-20
 
 ### Fixed

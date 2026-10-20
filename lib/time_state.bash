@@ -109,6 +109,15 @@ read_fail_until() {   # $1 = backoff file; epoch to hold retries until after a f
   [[ "$v" =~ ^[0-9]+$ ]] || v=0
   echo "$v"
 }
+# A retry counts as due up to a minute early. The failing ping stamped its retry
+# a second or two into its tick (after window_anchor), while a later tick checks
+# at its start — taken exactly, the tick backoff-minutes on would see the retry
+# a hair ahead and skip it, so every retry ran a tick late and one at the
+# guardrail cutoff never ran. Ticks are 5 minutes apart, so a minute of slack
+# never lets an earlier tick through.
+retry_pending() {  # $1 = backoff file  $2 = epoch; true while the retry is still ahead
+  [ "$(read_fail_until "$1")" -gt $(( $2 + 60 )) ]
+}
 read_fail_streak() {  # $1 = backoff file; consecutive failed pings; 0 if none/corrupt
   local n=0 rest
   [ -f "$1" ] && IFS='|' read -r n rest < "$1" 2>/dev/null || true

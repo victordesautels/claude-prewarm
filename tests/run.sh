@@ -346,6 +346,17 @@ PATH="$STUB_BIN:$PATH"; export PATH
 _logtail()    { tail -n1 "$LOG" 2>/dev/null; }
 _reset_fire() { : > "$LOG"; rm -f "$LAST_FIRE" "$LIMIT_UNTIL" "$LAST_SKIP" "$FIRE_HISTORY" "$FAIL_BACKOFF" "$RT_CALLS/claude"; rm -rf "$STATE_DIR/fire.lock"; PREV_TICK=0; }
 _reset_codex(){ : > "$LOG"; rm -f "$CODEX_LAST_FIRE" "$CODEX_LIMIT_UNTIL" "$CODEX_FAIL_BACKOFF" "$RT_CALLS/codex"; rm -rf "$STATE_DIR/codex.fire.lock"; }
+# Tests that set TIME to "now ± N minutes" by the wall clock: skip them while
+# those wall-clock times are not really N minutes from now — across a DST change
+# (a skipped or repeated hour) or past midnight.
+_wallclock_ok() {  # $@ = minute offsets the test builds TIME from
+  local n now d
+  n=$(now_min); now=$(( $(date +%s) / 60 * 60 ))
+  for d in 0 "$@"; do
+    { [ $(( n + d )) -ge 0 ] && [ $(( n + d )) -lt 1440 ]; } || return 1
+    [ "$(today_epoch "$(to_hm $(( n + d )))")" = $(( now + d * 60 )) ] || return 1
+  done
+}
 # hold_awake starts caffeinate in the background: give the stub a moment to log.
 _wait_for_call() {  # $1 = stub name, $2 = needle
   local i=0
@@ -438,14 +449,18 @@ assert_eq "battery_info reads battery + percent" "battery|15" "$(_batt "Now draw
 
 # On battery, an outside-active-hours tick must warn that the scheduled wake
 # needs AC. TIME=00:00/END=00:01 keeps 'now' past END for all but the first
-# minute of the day, so the target is always tomorrow's wake.
+# minutes of the day (skipped then), so the target is always tomorrow's wake.
 section "policy: check_wake_ac warns on battery"
-rm -f "$WAKE_AC_WARNED" "$RT_CALLS/pmset"; : > "$LOG"; : > "$WAKE_MARK"
-( export STUB_PMSET_BATT="Now drawing from 'Battery Power'; -InternalBattery-0 15%; discharging;"
-  WAKE="true"; MODE="standard"; DAYS="daily"; CALENDAR="none"; SKIP_DATES=""
-  TIME="00:00"; END="00:01"; NOTIFY="false"; check_wake_ac )
-assert_contains "logs a plug-in warning"          "$(cat "$LOG")" "needs AC power"
-assert_ok       "records the warned target date"  test -s "$WAKE_AC_WARNED"
+if [ "$(now_min)" -ge 2 ]; then
+  rm -f "$WAKE_AC_WARNED" "$RT_CALLS/pmset"; : > "$LOG"; : > "$WAKE_MARK"
+  ( export STUB_PMSET_BATT="Now drawing from 'Battery Power'; -InternalBattery-0 15%; discharging;"
+    WAKE="true"; MODE="standard"; DAYS="daily"; CALENDAR="none"; SKIP_DATES=""
+    TIME="00:00"; END="00:01"; NOTIFY="false"; check_wake_ac )
+  assert_contains "logs a plug-in warning"        "$(cat "$LOG")" "needs AC power"
+  assert_ok       "records the warned target date" test -s "$WAKE_AC_WARNED"
+else
+  _pass "check_wake_ac (skipped: first minutes of day)"
+fi
 
 # ---- time_state: window_anchor from session logs ---------------------------
 section "time_state: window_anchor"
@@ -472,8 +487,8 @@ _reply 14400 > "$CLAUDE_PROJECTS/session.jsonl"
 printf '%s\n%s\n' "$(( WA_NOW - 25200 ))" "$(( WA_NOW - 7200 ))" > "$FIRE_HISTORY"
 printf '%s' "$(( WA_NOW - 7200 ))" > "$LAST_FIRE"
 assert_eq "ping history keeps the real boundary"   "$(( WA_NOW - 7200 ))" "$(INTERVAL=300; window_anchor)"
-# Upgraded from 0.5.2, which kept no history (or from 0.5.3-0.5.5, which began
-# one without the 0.5.2 pings): the day's logged pings are merged in. Log times
+# Upgraded from 0.5.2, which kept no history: the day's logged pings stand in
+# until fire_history exists, and the first record_ping imports them. Log times
 # are local, so on the fall-back day an hour can read back an hour off; skip
 # the exact checks then.
 _logged() { date -r "$(( WA_NOW - $1 ))" '+%Y-%m-%d %H:%M:%S'; }
@@ -487,12 +502,19 @@ if _roundtrips 25200 7200; then
   rm -f "$FIRE_HISTORY"
   assert_eq "no fire_history -> pings from the log" "$(( WA_NOW - 7200 ))" "$(INTERVAL=300; window_anchor)"
   assert_eq "  ...Claude 'ok' lines only"           "$(printf '%s\n%s' "$(( WA_NOW - 25200 ))" "$(( WA_NOW - 7200 ))")" "$(pings_from_log)"
-  printf '%s\n' "$(( WA_NOW - 7200 ))" > "$FIRE_HISTORY"   # 0.5.3-0.5.5: history lacks the older ping
-  assert_eq "partial fire_history + log -> merged"  "$(( WA_NOW - 7200 ))" "$(INTERVAL=300; window_anchor)"
   printf 'garbage\0\0\0\n' >> "$LOG"                        # a NUL from a crash mid-write
   assert_eq "a NUL in the log doesn't hide its pings" 2 "$(pings_from_log | wc -l | tr -d ' ')"
   record_ping "$WA_NOW"
-  assert_eq "record_ping keeps its own history only" "$(printf '%s\n%s' "$(( WA_NOW - 7200 ))" "$WA_NOW")" "$(cat "$FIRE_HISTORY")"
+  assert_eq "first record_ping imports the logged pings" \
+            "$(printf '%s\n%s\n%s' "$(( WA_NOW - 25200 ))" "$(( WA_NOW - 7200 ))" "$WA_NOW")" "$(cat "$FIRE_HISTORY")"
+  # Once a history exists the log is never merged: its local stamps read back
+  # hours off in another TZ (or the fall-back hour), as phantom pings. History
+  # without the 25200s-ago ping: the 14400s-ago reply anchors the window.
+  printf '%s\n' "$(( WA_NOW - 7200 ))" > "$FIRE_HISTORY"
+  assert_eq "history present -> log ignored"        "$(( WA_NOW - 14400 ))" "$(INTERVAL=300; window_anchor)"
+  assert_eq "  ...even read from a shell in another TZ" "$(( WA_NOW - 14400 ))" "$(export TZ=Asia/Tokyo; INTERVAL=300; window_anchor)"
+  record_ping "$WA_NOW"
+  assert_eq "  ...and record_ping does not re-import it" "$(printf '%s\n%s' "$(( WA_NOW - 7200 ))" "$WA_NOW")" "$(cat "$FIRE_HISTORY")"
 else
   _pass "log backfill (skipped: DST-ambiguous local hour)"
 fi
@@ -560,18 +582,14 @@ FB_NOW=$(date +%s)
 assert_contains "logs a FAILED line with rc"      "$(_logtail)" "FAILED  rc=7  retry"
 assert_eq       "does NOT advance last_fire"      0 "$(read_lf)"
 assert_eq       "streak 1"                        1 "$(cut -d'|' -f1 "$FAIL_BACKOFF")"
-# on the minute, so the tick 15m on (same seconds past the minute) is not a
-# hair early and skipped
-assert_ok       "retry ~15m out"                  test $(( $(read_fail_until "$FAIL_BACKOFF") - FB_NOW )) -ge 840
-assert_ok       "  ...no later than the tick 15m on" test "$(read_fail_until "$FAIL_BACKOFF")" -le $(( FB_NOW + 900 ))
-assert_eq       "  ...on the minute"              0 "$(( $(read_fail_until "$FAIL_BACKOFF") % 60 ))"
+assert_ok       "retry ~15m out"                  test $(( $(read_fail_until "$FAIL_BACKOFF") - FB_NOW )) -ge 890
 assert_ok       "first failure notifies"          test -s "$RT_CALLS/osascript"
 rm -f "$RT_CALLS/osascript"; _fail_fire
 assert_eq       "streak 2"                        2 "$(cut -d'|' -f1 "$FAIL_BACKOFF")"
-assert_ok       "retry ~30m out"                  test $(( $(read_fail_until "$FAIL_BACKOFF") - FB_NOW )) -ge 1740
+assert_ok       "retry ~30m out"                  test $(( $(read_fail_until "$FAIL_BACKOFF") - FB_NOW )) -ge 1790
 assert_fail     "second failure stays quiet"      test -s "$RT_CALLS/osascript"
 _fail_fire
-assert_ok       "third retry ~60m out"            test $(( $(read_fail_until "$FAIL_BACKOFF") - FB_NOW )) -ge 3540
+assert_ok       "third retry ~60m out"            test $(( $(read_fail_until "$FAIL_BACKOFF") - FB_NOW )) -ge 3590
 # the streak is keyed on the last failure's day, not the retry time (which can
 # cross midnight); two days back stays a different date even across DST
 printf '9|%s|%s\n' "$(( FB_NOW + 3600 ))" "$(( FB_NOW - 172800 ))" > "$FAIL_BACKOFF"; _fail_fire
@@ -606,7 +624,7 @@ assert_fail     "a clean ping clears the back-off" test -f "$FAIL_BACKOFF"
 # The retry after a failure was due at its back-off time: firing on time then
 # is a recovery, not "Mac was asleep" measured from the slot that failed.
 section "fire: do_fire retry reads as recovered, not delayed"
-if [ "$(now_min)" -ge 20 ]; then
+if _wallclock_ok -16; then
   _reset_fire; rm -f "$RT_CALLS/osascript" "$LAST_RECOVERY"
   printf '1|%s|%s\n' "$(( $(date +%s) - 60 ))" "$(( $(date +%s) - 960 ))" > "$FAIL_BACKOFF"
   ( export STUB_CLAUDE_RC=0 STUB_CLAUDE_OUT="pong"
@@ -621,7 +639,7 @@ fi
 # Late against TIME, but the previous tick ran 5 minutes ago: an open window or a
 # guardrail held the fire back, so no "Mac was asleep" alert.
 section "fire: do_fire late but ticks ran on -> held, not asleep"
-if [ "$(now_min)" -ge 60 ]; then
+if _wallclock_ok -45; then
   _reset_fire; rm -f "$RT_CALLS/osascript" "$LAST_RECOVERY"
   ( export STUB_CLAUDE_RC=0; PREV_TICK=$(( $(date +%s) - 300 ))
     MODE="standard"; INTERVAL=300; TIME="$(to_hm $(( $(now_min) - 45 )))"; END="23:59"; NOTIFY="delayed"; do_fire tick )
@@ -642,6 +660,9 @@ assert_eq       "no previous tick -> 0"           0 "$PREV_TICK"
 assert_ok       "stamps this tick"                _is_pos_int "$(cat "$LAST_TICK")"
 printf '%s' 1234 > "$LAST_TICK"; note_tick
 assert_eq       "reads the previous tick"         1234 "$PREV_TICK"
+printf '%s' 1234 > "$LAST_TICK"; chmod 444 "$LAST_TICK"
+assert_eq       "unwritable last_tick: the tick carries on" "ok 1234" "$( set -e; note_tick; echo "ok $PREV_TICK" )"
+chmod 644 "$LAST_TICK"
 PREV_TICK=0
 
 section "fire: do_fire kills a hung ping"
@@ -713,6 +734,33 @@ assert_ok       "cmd_tick fired -> last_fire set" _is_pos_int "$(read_lf)"
 assert_ok       "cmd_tick pinged claude"          test -s "$RT_CALLS/claude"
 assert_contains "cmd_tick logs an ok fire"        "$(_logtail)" "ok"
 
+# The failing tick checked at T but stamped its retry at T+2 (after
+# window_anchor, across a minute boundary); the tick 15m on checks at T+900-1.
+# It must retry — a tick late, and at the guardrail cutoff not at all, otherwise.
+section "policy: retry_pending slack"
+RP_T=$(date +%s)
+printf '1|%s|%s\n' "$(( RP_T + 2 + 900 ))" "$(( RP_T + 2 ))" > "$FAIL_BACKOFF"
+assert_fail     "tick 15m on (1s early, retry stamped 2s late) retries" retry_pending "$FAIL_BACKOFF" $(( RP_T + 899 ))
+assert_ok       "tick 10m on still waits"         retry_pending "$FAIL_BACKOFF" $(( RP_T + 600 ))
+printf '1|%s|%s\n' "$(( RP_T + 900 ))" "$RP_T" > "$FAIL_BACKOFF"
+assert_ok       "61s ahead -> pending"            retry_pending "$FAIL_BACKOFF" $(( RP_T + 839 ))
+assert_fail     "59s ahead -> due"                retry_pending "$FAIL_BACKOFF" $(( RP_T + 841 ))
+rm -f "$FAIL_BACKOFF"
+assert_fail     "no back-off file -> nothing pending" retry_pending "$FAIL_BACKOFF" "$RP_T"
+
+# Both pings stamp their retry from the tick's start, so Codex — whose turn
+# comes after Claude's ping, minutes later if that one timed out — is not
+# pushed a tick late either.
+section "fire: retries stamped from the tick's start"
+TN=$(( $(date +%s) - 100 ))
+_reset_fire
+( export STUB_CLAUDE_RC=7; TICK_NOW=$TN; MODE="standard"; INTERVAL=300; TIME="$(date +%H:%M)"; END="23:59"; NOTIFY="false"; do_fire tick )
+assert_eq       "Claude retry = tick start + 15m" $(( TN + 900 )) "$(read_fail_until "$FAIL_BACKOFF")"
+_reset_codex
+( export STUB_CODEX_RC=7; TICK_NOW=$TN; CODEX="true"; CODEX_PROMPT="ping"; MODE="standard"; INTERVAL=300; TIME="00:00"; END="23:59"; NOTIFY="false"; do_codex_fire tick )
+assert_eq       "Codex retry = tick start + 15m"  $(( TN + 900 )) "$(read_fail_until "$CODEX_FAIL_BACKOFF")"
+_reset_fire; _reset_codex
+
 section "fire: cmd_tick honors the failure back-off"
 _reset_fire
 printf '1|%s|%s\n' "$(( $(date +%s) + 600 ))" "$(date +%s)" > "$FAIL_BACKOFF"
@@ -768,6 +816,10 @@ record_skip_once all "guardrail: only 50m left before END"
 record_skip_once all "guardrail: battery 19%"
 record_skip_once all "guardrail: battery 18%"
 assert_eq       "one line per distinct reason"    2 "$(grep -c SKIP "$LOG")"
+: > "$LOG"; rm -f "$LAST_SKIP"
+record_skip_once all "guardrail: only 56m left before END"
+record_skip_once all "guardrail: only 6m left before END"
+assert_eq       "56m and 6m count as one reason"  1 "$(grep -c SKIP "$LOG")"
 # Claude and Codex skips keep separate slots: alternating them logs each once.
 : > "$LOG"
 for _i in 1 2 3; do
@@ -781,7 +833,7 @@ assert_contains "last skip summary shows the latest" "$(last_skip_summary)" "cod
 # hold the Mac awake and wait for TIME rather than skip — but only when the
 # tick at TIME would fire. sleep is stubbed.
 section "fire: wait_for_time"
-if [ "$(now_min)" -lt 1420 ] && [ "$(now_min)" -gt 0 ]; then
+if _wallclock_ok 2 -1 10 20; then
   _wft() { ( export STUB_SLEEP=1; MODE="${2:-standard}"; DAYS="daily"; CALENDAR="none"; SKIP_DATES=""
              INTERVAL=300; END="${3:-23:59}"; MIN_REMAINING_MIN=0; LOW_BATTERY_SKIP="false"
              [ -n "${4:-}" ] && MIN_REMAINING_MIN="$4"

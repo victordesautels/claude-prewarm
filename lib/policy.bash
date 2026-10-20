@@ -132,16 +132,17 @@ check_wake_ac() {
   notify alert "Claude prewarm - plug in" "Mac is on battery. The $target $TIME wake will not fully wake it and the prewarm will be missed. Connect power."
   return 0
 }
+mask_numbers() { printf '%s' "$1" | sed -E 's/[0-9]+/#/g'; }   # "only 56m left" = "only 6m left"
 # LAST_SKIP holds today's latest "YYYYMMDD|agent|reason" per agent (all, claude,
 # codex), so Claude and Codex skips don't keep displacing each other.
 record_skip_once() {  # $1=agent $2=reason
   local agent="$1" reason="$2" day prev ts
   ts="$(date '+%Y-%m-%d %H:%M:%S')"; day="$(date '+%Y%m%d')"
   prev="$(awk -F'|' -v d="$day" -v ag="$agent" '$1 == d && $2 == ag { r = $3 } END { print r }' "$LAST_SKIP" 2>/dev/null || true)"
-  # Same reason with digits masked = already logged today. A countdown ("only
-  # 55m left", then "50m") or a draining battery % is one skip, not one log line
-  # per tick.
-  [ -n "$prev" ] && [ "${prev//[0-9]/#}" = "${reason//[0-9]/#}" ] && return 0
+  # Same reason with each number masked = already logged today. A countdown
+  # ("only 55m left", then "5m") or a draining battery % is one skip, not one
+  # log line per tick.
+  [ -n "$prev" ] && [ "$(mask_numbers "$prev")" = "$(mask_numbers "$reason")" ] && return 0
   { awk -F'|' -v d="$day" -v ag="$agent" '$1 == d && $2 != ag' "$LAST_SKIP" 2>/dev/null || true
     echo "$day|$agent|$reason"; } > "$LAST_SKIP.tmp" && mv "$LAST_SKIP.tmp" "$LAST_SKIP"
   printf '%s  SKIP    %s: %s\n' "$ts" "$agent" "$reason" >> "$LOG"
@@ -150,12 +151,14 @@ record_recovery() {  # $1=agent $2=due_epoch $3=fired_epoch $4=delay_min $5=next
   printf '%s|%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" "$5" > "$LAST_RECOVERY"
 }
 # Our own pings for window_anchor: with --no-session-persistence they leave no
-# session log. FIRE_HISTORY keeps one day of them, and the day's "ok" lines in
-# the log are merged in too: 0.5.2 kept neither, and 0.5.3-0.5.5 started a
-# history without the 0.5.2 pings before it. Duplicates are harmless to the replay.
+# session log. FIRE_HISTORY keeps one day of them as exact epochs. Only while it
+# does not exist yet (an upgrade from 0.5.2, which kept neither) do the day's
+# "ok" lines in the log stand in, and the first record_ping imports them once.
+# The log is never merged beside a history: its stamps are local time with no
+# UTC offset, so a shell in another TZ, a trip, or the fall-back hour reads them
+# back hours off, as phantom pings that misplace the window.
 ping_history() {
-  cat "$FIRE_HISTORY" 2>/dev/null || true
-  pings_from_log
+  if [ -f "$FIRE_HISTORY" ]; then cat "$FIRE_HISTORY"; else pings_from_log; fi
 }
 pings_from_log() {  # epochs of today's and yesterday's "ok" Claude pings in LOG
   local t
@@ -166,7 +169,7 @@ pings_from_log() {  # epochs of today's and yesterday's "ok" Claude pings in LOG
 }
 record_ping() {  # $1 = epoch
   local cut=$(( $1 - 86400 ))
-  { awk -v c="$cut" '/^[0-9]+$/ && $0 + 0 >= c' "$FIRE_HISTORY" 2>/dev/null || true
+  { ping_history | awk -v c="$cut" '/^[0-9]+$/ && $0 + 0 >= c' || true
     echo "$1"; } > "$FIRE_HISTORY.tmp" && mv "$FIRE_HISTORY.tmp" "$FIRE_HISTORY"
 }
 backoff_min() { case "$1" in 1) echo 15;; 2) echo 30;; *) echo 60;; esac; }   # $1 = streak
@@ -186,10 +189,7 @@ record_failure() {  # $1 = backoff file  $2 = now epoch
   { [[ "$n" =~ ^[0-9]+$ ]] && [[ "$last" =~ ^[0-9]+$ ]]; } || { n=0; last=0; }
   [ "$last" -gt 0 ] && [ "$(epoch_day "$last")" != "$(epoch_day "$nowE")" ] && n=0
   n=$(( n + 1 ))
-  # Retry on the minute. nowE is taken a second or two into the failing tick, so
-  # an unrounded retry is that much later than the tick 15m on, which then
-  # skipped it — every retry ran a tick late, and one at the cutoff never did.
-  printf '%s|%s|%s\n' "$n" "$(( (nowE + $(backoff_min "$n") * 60) / 60 * 60 ))" "$nowE" > "$f"
+  { printf '%s|%s|%s\n' "$n" "$(( nowE + $(backoff_min "$n") * 60 ))" "$nowE" > "$f"; } 2>/dev/null || true
   echo "$n"
 }
 # Would the Claude ping be due at epoch $1, going by the usage-limit pause, the
@@ -198,7 +198,7 @@ record_failure() {  # $1 = backoff file  $2 = now epoch
 claude_due() {  # $1 = epoch
   local at="$1" lf lf_day
   [ "$(read_limit_until)" -gt "$at" ] && return 1
-  [ "$(read_fail_until "$FAIL_BACKOFF")" -gt "$at" ] && return 1
+  retry_pending "$FAIL_BACKOFF" "$at" && return 1
   lf=$(read_lf)
   lf_day=$( [ "$lf" -gt 0 ] && date -r "$lf" '+%Y%m%d' 2>/dev/null || echo 0 )
   { [ "$lf" -eq 0 ] || [ "$lf_day" != "$(date -r "$at" '+%Y%m%d')" ]; } && return 0

@@ -140,6 +140,7 @@ cmd_uninstall() {
   fi
   unload_agent "$LABEL" "$PLIST";             rm -f "$PLIST"
   unload_agent "$AWAKE_LABEL" "$AWAKE_PLIST"; rm -f "$AWAKE_PLIST"
+  rm -f "$LAST_TICK"   # a reinstall's first late fire must not read the gap as a sleeping Mac
   printf '%s %s\n' "$(green "$S_OK")" "Removed launchd agent(s)."
   clear_wake
   if [ "$purge" = 1 ]; then

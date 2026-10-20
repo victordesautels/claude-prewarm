@@ -359,8 +359,10 @@ expect "codex back-off -> skip"            "SKIP    codex: retrying failed ping"
 rm -f "$SB/codex.fail" "$ST/codex_fail_backoff"
 
 # a tick two minutes before TIME waits for it (sleep stubbed), then — still
-# before TIME by the real clock — skips as outside active hours
-if [ "$(nm)" -ge 1 ] && [ "$(nm)" -lt 1430 ]; then
+# before TIME by the real clock — skips as outside active hours. Skipped when
+# "now + 2 min" by the wall clock is not 2 minutes away (DST change, midnight).
+in2() { [ "$(nm)" -lt 1430 ] && [ "$(date -j -f '%Y-%m-%d %H:%M:%S' "$(date +%F) $(hm $(( $(nm) + 2 ))):00" +%s)" = $(( $(date +%s) / 60 * 60 + 120 )) ]; }
+if in2; then
   conf "$(hm $(( $(nm) + 2 )))" 23:59 0 false
   forget; rm -f "$SB/sleep.calls"
   export STUB_SLEEP=1
@@ -369,8 +371,12 @@ if [ "$(nm)" -ge 1 ] && [ "$(nm)" -lt 1430 ]; then
   grep -q 'WAIT ' "$ST/prewarm.log" && [ -s "$SB/sleep.calls" ] \
     && ok "e2e: waited for TIME" || fail "e2e: waited for TIME" "$(tail -n3 "$ST/prewarm.log")"
 else
-  skip "e2e: wait_for_time path" "too close to midnight"
+  skip "e2e: wait_for_time path" "now+2min is not 2 minutes away (DST change or midnight)"
 fi
+# uninstall forgets last_tick, so a reinstall's first late fire isn't read as a sleeping Mac
+printf '1\n' > "$ST/last_tick"
+run_cli uninstall -y >/dev/null || true
+[ ! -e "$ST/last_tick" ] && ok "e2e: uninstall forgets last_tick" || fail "e2e: uninstall forgets last_tick"
 rm -rf "$SB"
 
 # ---- notifier source: env-first, UTF-8-safe ------------------------------------

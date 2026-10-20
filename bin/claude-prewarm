@@ -31,7 +31,7 @@
 #
 set -euo pipefail
 
-VERSION="0.5.7-beta"
+VERSION="0.5.8-beta"
 LABEL="com.claude-prewarm"
 AWAKE_LABEL="com.claude-prewarm.awake"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
