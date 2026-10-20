@@ -237,7 +237,7 @@ cmd_status() {
   elif [ "$lu" -gt "$nowE" ]; then
     printf '  %s %s\n' "$(yellow "$S_WARN limited")" "$(dim "usage limit — prewarms paused until $(date -r "$lu" '+%H:%M')")"
   elif [ "$fu" -gt "$nowE" ]; then
-    printf '  %s %s\n' "$(yellow "$S_WARN failing")" "$(dim "last ping failed — retrying at $(date -r "$fu" '+%H:%M') · claude-prewarm logs")"
+    printf '  %s %s\n' "$(yellow "$S_WARN failing")" "$(dim "last ping failed · $(retry_text "$(date -r "$fu" '+%H:%M')") See: claude-prewarm logs")"
   elif [ "$anchor" -gt 0 ] && [ "$elapsed" -lt "$INTERVAL" ]; then
     printf '  %s %s\n' "$(green "$S_DOT active")" "$(dim "window open until $(date -r $((anchor+INTERVAL*60)) '+%H:%M') · $((INTERVAL-elapsed))m left")"
   elif [ -n "$skip" ]; then
@@ -283,8 +283,8 @@ cmd_status() {
   [ -n "$lskip" ] && row "last skip" "$lskip"
   [ "$lu" -gt "$nowE" ] && row "limit" "$(yellow "$S_WARN paused") $(dim "until $(date -r "$lu" '+%H:%M')")"
   [ "$clu" -gt "$nowE" ] && row "codex lim" "$(yellow "$S_WARN paused") $(dim "until $(date -r "$clu" '+%H:%M')")"
-  [ "$fu" -gt "$nowE" ] && row "retry" "$(yellow "$S_WARN failed") $(dim "retrying at $(date -r "$fu" '+%H:%M')")"
-  [ "$cfu" -gt "$nowE" ] && row "codex err" "$(yellow "$S_WARN failed") $(dim "retrying at $(date -r "$cfu" '+%H:%M')")"
+  [ "$fu" -gt "$nowE" ] && row "retry" "$(yellow "$S_WARN failed") $(dim "$(retry_text "$(date -r "$fu" '+%H:%M')")")"
+  [ "$cfu" -gt "$nowE" ] && row "codex err" "$(yellow "$S_WARN failed") $(dim "$(retry_text "$(date -r "$cfu" '+%H:%M')")")"
 
   printf '\n'
   command -v ccusage >/dev/null 2>&1 && row "ccusage" "$(dim "installed — run 'ccusage blocks' for live token spend")"

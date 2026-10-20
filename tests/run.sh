@@ -472,17 +472,30 @@ _reply 14400 > "$CLAUDE_PROJECTS/session.jsonl"
 printf '%s\n%s\n' "$(( WA_NOW - 25200 ))" "$(( WA_NOW - 7200 ))" > "$FIRE_HISTORY"
 printf '%s' "$(( WA_NOW - 7200 ))" > "$LAST_FIRE"
 assert_eq "ping history keeps the real boundary"   "$(( WA_NOW - 7200 ))" "$(INTERVAL=300; window_anchor)"
-# Upgraded from 0.5.2, which kept no history: the day's pings come from the log.
+# Upgraded from 0.5.2, which kept no history (or from 0.5.3-0.5.5, which began
+# one without the 0.5.2 pings): the day's logged pings are merged in. Log times
+# are local, so on the fall-back day an hour can read back an hour off; skip
+# the exact checks then.
 _logged() { date -r "$(( WA_NOW - $1 ))" '+%Y-%m-%d %H:%M:%S'; }
-rm -f "$FIRE_HISTORY"
-{ printf '%s  ok  anchor DELAYED due=06:00 +20m  window~x\n' "$(_logged 25200)"
-  printf '%s  ok  codex boundary on-time      ping~x\n' "$(_logged 9000)"
-  printf '%s  FAILED  rc=1  retry 10:00  boom\n' "$(_logged 8000)"
-  printf '%s  ok  boundary on-time        window~x\n' "$(_logged 7200)"; } > "$LOG"
-assert_eq "no fire_history -> pings from the log"  "$(( WA_NOW - 7200 ))" "$(INTERVAL=300; window_anchor)"
-assert_eq "  ...Claude 'ok' lines only"            "$(printf '%s\n%s' "$(( WA_NOW - 25200 ))" "$(( WA_NOW - 7200 ))")" "$(pings_from_log)"
-record_ping "$WA_NOW"
-assert_eq "first record_ping keeps the logged ones" 3 "$(wc -l < "$FIRE_HISTORY" | tr -d ' ')"
+_roundtrips() { local s; for s in "$@"; do
+  [ "$(date -j -f '%Y-%m-%d %H:%M:%S' "$(_logged "$s")" +%s)" = "$(( WA_NOW - s ))" ] || return 1; done; }
+if _roundtrips 25200 7200; then
+  { printf '%s  ok  anchor DELAYED due=06:00 +20m  window~x\n' "$(_logged 25200)"
+    printf '%s  ok  codex boundary on-time      ping~x\n' "$(_logged 9000)"
+    printf '%s  FAILED  rc=1  retry 10:00  boom\n' "$(_logged 8000)"
+    printf '%s  ok  boundary on-time        window~x\n' "$(_logged 7200)"; } > "$LOG"
+  rm -f "$FIRE_HISTORY"
+  assert_eq "no fire_history -> pings from the log" "$(( WA_NOW - 7200 ))" "$(INTERVAL=300; window_anchor)"
+  assert_eq "  ...Claude 'ok' lines only"           "$(printf '%s\n%s' "$(( WA_NOW - 25200 ))" "$(( WA_NOW - 7200 ))")" "$(pings_from_log)"
+  printf '%s\n' "$(( WA_NOW - 7200 ))" > "$FIRE_HISTORY"   # 0.5.3-0.5.5: history lacks the older ping
+  assert_eq "partial fire_history + log -> merged"  "$(( WA_NOW - 7200 ))" "$(INTERVAL=300; window_anchor)"
+  printf 'garbage\0\0\0\n' >> "$LOG"                        # a NUL from a crash mid-write
+  assert_eq "a NUL in the log doesn't hide its pings" 2 "$(pings_from_log | wc -l | tr -d ' ')"
+  record_ping "$WA_NOW"
+  assert_eq "record_ping keeps its own history only" "$(printf '%s\n%s' "$(( WA_NOW - 7200 ))" "$WA_NOW")" "$(cat "$FIRE_HISTORY")"
+else
+  _pass "log backfill (skipped: DST-ambiguous local hour)"
+fi
 : > "$LOG"
 rm -f "$LAST_FIRE" "$FIRE_HISTORY" "$CLAUDE_PROJECTS"/*.jsonl
 
@@ -500,13 +513,26 @@ assert_ok       "holds the Mac awake for the ping" _wait_for_call caffeinate "-w
 
 # A boundary fire that's overdue (Mac was asleep) must log DELAYED and record
 # recovery. Seed last-fire 1h ago; with INTERVAL=5 the boundary was due ~55m ago.
+# (The previous tick ran 50m ago: the Mac slept through the boundary. Skipped in
+# the first 70 minutes of the day, when last-fire-1h-ago would be yesterday.)
 section "fire: do_fire delayed recovery"
-_reset_fire; rm -f "$LAST_RECOVERY"
-printf '%s' "$(( $(date +%s) - 3600 ))" > "$LAST_FIRE"
-( export STUB_CLAUDE_RC=0 STUB_CLAUDE_OUT="pong"
-  MODE="standard"; INTERVAL=5; TIME="00:00"; END="23:59"; PROMPT="ping"; MODEL=""; NOTIFY="false"; CODEX="false"; do_fire tick )
-assert_contains "logs a DELAYED fire"             "$(_logtail)" "DELAYED due="
-assert_ok       "writes recovery state"           test -s "$LAST_RECOVERY"
+if [ "$(now_min)" -ge 70 ]; then
+  _reset_fire; rm -f "$LAST_RECOVERY"
+  printf '%s' "$(( $(date +%s) - 3600 ))" > "$LAST_FIRE"
+  ( export STUB_CLAUDE_RC=0 STUB_CLAUDE_OUT="pong"; PREV_TICK=$(( $(date +%s) - 3000 ))
+    MODE="standard"; INTERVAL=5; TIME="00:00"; END="23:59"; PROMPT="ping"; MODEL=""; NOTIFY="false"; CODEX="false"; do_fire tick )
+  assert_contains "logs a DELAYED fire"           "$(_logtail)" "DELAYED due="
+  assert_ok       "writes recovery state"         test -s "$LAST_RECOVERY"
+  # first tick since install/upgrade: no previous tick to judge sleep by
+  _reset_fire; rm -f "$LAST_RECOVERY" "$RT_CALLS/osascript"
+  printf '%s' "$(( $(date +%s) - 3600 ))" > "$LAST_FIRE"
+  ( export STUB_CLAUDE_RC=0 STUB_CLAUDE_OUT="pong"; PREV_TICK=0
+    MODE="standard"; INTERVAL=5; TIME="00:00"; END="23:59"; NOTIFY="delayed"; CODEX="false"; do_fire tick )
+  assert_contains "unknown previous tick -> held, not asleep" "$(_logtail)" "held +55m (first tick, cause unknown)"
+  assert_fail     "  ...no alert"                 test -s "$RT_CALLS/osascript"
+else
+  _pass "do_fire delayed recovery (skipped: first 70 minutes of day)"
+fi
 
 section "fire: do_fire usage-limit backoff"
 _reset_fire
@@ -534,14 +560,18 @@ FB_NOW=$(date +%s)
 assert_contains "logs a FAILED line with rc"      "$(_logtail)" "FAILED  rc=7  retry"
 assert_eq       "does NOT advance last_fire"      0 "$(read_lf)"
 assert_eq       "streak 1"                        1 "$(cut -d'|' -f1 "$FAIL_BACKOFF")"
-assert_ok       "retry ~15m out"                  test $(( $(read_fail_until "$FAIL_BACKOFF") - FB_NOW )) -ge 890
+# on the minute, so the tick 15m on (same seconds past the minute) is not a
+# hair early and skipped
+assert_ok       "retry ~15m out"                  test $(( $(read_fail_until "$FAIL_BACKOFF") - FB_NOW )) -ge 840
+assert_ok       "  ...no later than the tick 15m on" test "$(read_fail_until "$FAIL_BACKOFF")" -le $(( FB_NOW + 900 ))
+assert_eq       "  ...on the minute"              0 "$(( $(read_fail_until "$FAIL_BACKOFF") % 60 ))"
 assert_ok       "first failure notifies"          test -s "$RT_CALLS/osascript"
 rm -f "$RT_CALLS/osascript"; _fail_fire
 assert_eq       "streak 2"                        2 "$(cut -d'|' -f1 "$FAIL_BACKOFF")"
-assert_ok       "retry ~30m out"                  test $(( $(read_fail_until "$FAIL_BACKOFF") - FB_NOW )) -ge 1790
+assert_ok       "retry ~30m out"                  test $(( $(read_fail_until "$FAIL_BACKOFF") - FB_NOW )) -ge 1740
 assert_fail     "second failure stays quiet"      test -s "$RT_CALLS/osascript"
 _fail_fire
-assert_ok       "third retry ~60m out"            test $(( $(read_fail_until "$FAIL_BACKOFF") - FB_NOW )) -ge 3590
+assert_ok       "third retry ~60m out"            test $(( $(read_fail_until "$FAIL_BACKOFF") - FB_NOW )) -ge 3540
 # the streak is keyed on the last failure's day, not the retry time (which can
 # cross midnight); two days back stays a different date even across DST
 printf '9|%s|%s\n' "$(( FB_NOW + 3600 ))" "$(( FB_NOW - 172800 ))" > "$FAIL_BACKOFF"; _fail_fire
@@ -695,7 +725,7 @@ rm -f "$FAIL_BACKOFF"
 # window: no ping.
 section "fire: cmd_tick declines inside an open window"
 _reset_fire
-printf '%s' "$(( $(date +%s) - 86400 ))" > "$LAST_FIRE"
+printf '%s' "$(( $(date +%s) - 172800 ))" > "$LAST_FIRE"
 _reply 180 > "$CLAUDE_PROJECTS/session.jsonl"
 ( _tick_due )
 assert_fail     "does NOT ping claude"            test -s "$RT_CALLS/claude"
@@ -712,7 +742,7 @@ if [ "$(now_min)" -ge 301 ]; then
   today_epoch 00:00 > "$LAST_FIRE"                # fired at midnight; window closed at 05:00
   _tick_daily
   assert_fail     "already fired today -> no ping" test -s "$RT_CALLS/claude"
-  printf '%s' "$(( $(date +%s) - 86400 ))" > "$LAST_FIRE"
+  printf '%s' "$(( $(date +%s) - 172800 ))" > "$LAST_FIRE"   # 2 days back: another date even across DST
   _tick_daily
   assert_ok       "not yet today -> pings"        test -s "$RT_CALLS/claude"
 else

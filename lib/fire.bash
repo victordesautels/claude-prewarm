@@ -83,12 +83,17 @@ note_tick() {
   if [[ "$v" =~ ^[0-9]+$ ]]; then PREV_TICK="$v"; else PREV_TICK=0; fi
   date +%s > "$LAST_TICK"
 }
-late_kind() {  # $1 = now epoch; prints held (ticks ran on) or asleep
-  if [ "${PREV_TICK:-0}" -gt 0 ] && [ $(( $1 - PREV_TICK )) -le $(( GRACE_MIN * 60 )) ]; then
+late_kind() {  # $1 = now epoch; prints held (ticks ran on), asleep, or unknown
+  if [ "${PREV_TICK:-0}" -eq 0 ]; then
+    echo unknown     # first tick since install or upgrade: no evidence of sleep
+  elif [ $(( $1 - PREV_TICK )) -le $(( GRACE_MIN * 60 )) ]; then
     echo held
   else
     echo asleep
   fi
+}
+late_note() {  # $1 = late_kind (held|unknown): the log's reason for a late, alert-free fire
+  if [ "$1" = "held" ]; then echo "window open or skipped"; else echo "first tick, cause unknown"; fi
 }
 
 # Failure alert tail: a retry past the day's last possible prewarm (END less the
@@ -108,7 +113,7 @@ retry_text() {  # $1 = retry HH:MM
 do_fire() {  # $1 = tick | manual
   local mode="${1:-tick}" claude_bin ts nowE win_start win_end out rc tmp
   local lf elapsed today lf_day sched=0 delay=0 delayed=0 kind="" reanchor=1 win_open=0 margs=()
-  local anchor=0 reset_epoch="" step streak retry_at fails=0 fu held=0
+  local anchor=0 reset_epoch="" step streak retry_at fails=0 fu late=""
   local lockdir="$STATE_DIR/fire.lock"
 
   # Guard against overlapping fires (e.g. a hung `claude -p`); auto-clear a stale lock.
@@ -148,7 +153,8 @@ do_fire() {  # $1 = tick | manual
     if [ "$fu" -gt "$sched" ]; then sched="$fu"; fails=$(read_fail_streak "$FAIL_BACKOFF"); fi
     delay=$(( (nowE - sched) / 60 ))
     if [ "$delay" -gt "$GRACE_MIN" ]; then
-      if [ "$(late_kind "$nowE")" = "held" ]; then held=1; else delayed=1; fi
+      late=$(late_kind "$nowE")
+      if [ "$late" = "asleep" ]; then delayed=1; fi
     fi
   fi
 
@@ -217,8 +223,8 @@ do_fire() {  # $1 = tick | manual
   elif [ "$fails" -gt 0 ]; then
     printf '%s  ok  %s recovered after %d failed  window~%s-%s\n' "$ts" "$kind" "$fails" "$win_start" "$win_end" >> "$LOG"
     notify alert "Claude prewarm - recovered" "Ping worked after $fails failed. Window $win_start-$win_end."
-  elif [ "$held" -eq 1 ]; then
-    printf '%s  ok  %s held +%dm (window open or skipped)  window~%s-%s\n' "$ts" "$kind" "$delay" "$win_start" "$win_end" >> "$LOG"
+  elif [ -n "$late" ]; then
+    printf '%s  ok  %s held +%dm (%s)  window~%s-%s\n' "$ts" "$kind" "$delay" "$(late_note "$late")" "$win_start" "$win_end" >> "$LOG"
     notify routine "Claude prewarm" "Window anchored at $win_start (until $win_end)."
   else
     printf '%s  ok  %s on-time        window~%s-%s\n' "$ts" "$kind" "$win_start" "$win_end" >> "$LOG"
@@ -229,7 +235,7 @@ do_fire() {  # $1 = tick | manual
 
 do_codex_fire() {  # $1 = tick | manual
   local mode="${1:-tick}" codex_bin ts nowE ping_start ping_end out rc tmp
-  local lf today lf_day sched=0 delay=0 delayed=0 kind="" reset_epoch="" cargs=() step streak retry_at fails=0 fu held=0
+  local lf today lf_day sched=0 delay=0 delayed=0 kind="" reset_epoch="" cargs=() step streak retry_at fails=0 fu late=""
   local lockdir="$STATE_DIR/codex.fire.lock"
 
   [ "$CODEX" = "true" ] || return 0
@@ -264,7 +270,8 @@ do_codex_fire() {  # $1 = tick | manual
     if [ "$fu" -gt "$sched" ]; then sched="$fu"; fails=$(read_fail_streak "$CODEX_FAIL_BACKOFF"); fi
     delay=$(( (nowE - sched) / 60 ))
     if [ "$delay" -gt "$GRACE_MIN" ]; then
-      if [ "$(late_kind "$nowE")" = "held" ]; then held=1; else delayed=1; fi
+      late=$(late_kind "$nowE")
+      if [ "$late" = "asleep" ]; then delayed=1; fi
     fi
   fi
 
@@ -326,8 +333,8 @@ do_codex_fire() {  # $1 = tick | manual
   elif [ "$fails" -gt 0 ]; then
     printf '%s  ok  codex %s recovered after %d failed  ping~%s-%s\n' "$ts" "$kind" "$fails" "$ping_start" "$ping_end" >> "$LOG"
     notify alert "Codex prewarm - recovered" "Codex ping worked after $fails failed."
-  elif [ "$held" -eq 1 ]; then
-    printf '%s  ok  codex %s held +%dm (skipped until now)  ping~%s-%s\n' "$ts" "$kind" "$delay" "$ping_start" "$ping_end" >> "$LOG"
+  elif [ -n "$late" ]; then
+    printf '%s  ok  codex %s held +%dm (%s)  ping~%s-%s\n' "$ts" "$kind" "$delay" "$(late_note "$late")" "$ping_start" "$ping_end" >> "$LOG"
     notify routine "Codex prewarm" "Codex ping sent at $ping_start."
   else
     printf '%s  ok  codex %s on-time      ping~%s-%s\n' "$ts" "$kind" "$ping_start" "$ping_end" >> "$LOG"

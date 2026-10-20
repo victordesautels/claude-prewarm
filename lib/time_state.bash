@@ -69,9 +69,10 @@ window_anchor() {
   nowE=$(date +%s)
   {
     if [ -d "$dir" ]; then
-      find "$dir" -type f -name '*.jsonl' -mmin -1440 -exec env LC_ALL=C grep -h '"type":"assistant"' {} + \
-        | LC_ALL=C grep -v '"model":"<synthetic>"' \
-        | LC_ALL=C grep -oE '"timestamp":"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' || true
+      # -a: a NUL-damaged log must not read as "Binary file matches"
+      find "$dir" -type f -name '*.jsonl' -mmin -1440 -exec env LC_ALL=C grep -ah '"type":"assistant"' {} + \
+        | LC_ALL=C grep -av '"model":"<synthetic>"' \
+        | LC_ALL=C grep -aoE '"timestamp":"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' || true
     fi
     ping_history
     read_lf

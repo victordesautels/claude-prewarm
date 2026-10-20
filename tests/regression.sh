@@ -312,10 +312,10 @@ expect() {
 conf 00:00 23:59 0 false
 expect "first tick fires"                  "ok  anchor" claude 1
 expect "cadence not due -> no second ping" "ok  anchor" claude 1
-# due by cadence (last fire yesterday), but your own reply 3m ago opened a window.
-# forget() rewinds our pings to yesterday; an empty fire_history (not a missing
-# one) keeps the ok lines already in the log from being backfilled.
-forget() { printf '%s' "$(( $(date +%s) - 86400 ))" > "$ST/last_fire"; : > "$ST/fire_history"; }
+# due by cadence (last fire two days ago), but your own reply 3m ago opened a
+# window. forget() drops every trace of our earlier pings: last_fire,
+# fire_history, and the log's ok lines (merged into the window replay).
+forget() { printf '%s' "$(( $(date +%s) - 172800 ))" > "$ST/last_fire"; : > "$ST/fire_history"; : > "$ST/prewarm.log"; }
 forget; reply 180
 expect "open window (session log) -> no ping" "" claude 1
 rm -f "$SB/.claude/projects/p/s.jsonl"; : > "$SB/claude.fail"

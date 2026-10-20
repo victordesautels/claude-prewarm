@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.7-beta] — 2026-10-20
+
+### Fixed
+- A failed ping's retry time now falls on the minute. It was taken a second
+  or two into the failing tick, so the tick 15 minutes later skipped it as a
+  hair early. Every retry ran 5 minutes late, and a retry at the day's last
+  possible prewarm never ran at all. `status` now says "No retry today" past
+  that cutoff too.
+- The day's logged pings are always merged into window detection, not only
+  when `fire_history` is missing. An upgrade through 0.5.3–0.5.5 had started
+  a history without the earlier 0.5.2 pings.
+- A NUL byte in `prewarm.log` or a session log (a crash mid-write) no longer
+  makes BSD grep treat it as binary and silently drop its lines.
+- The first tick after an install or upgrade has no previous tick to tell a
+  sleeping Mac by. A late fire on that tick is now logged as `held … (first
+  tick, cause unknown)` with no "Mac was asleep" alert.
+- Tests that failed only at certain times now pass at any time: the
+  daily-mode test on the fall-back DST evening, the backfill test in the
+  repeated hour, and the delayed-recovery test just after midnight.
+
 ## [0.5.6-beta] — 2026-10-20
 
 ### Fixed
