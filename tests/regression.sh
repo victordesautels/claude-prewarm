@@ -269,7 +269,9 @@ sandbox
 CFG="$SB/.config/claude-prewarm/config"; ST="$SB/.local/state/claude-prewarm"
 mkdir -p "$SB/.config/claude-prewarm" "$SB/.claude/projects/p"
 conf() {  # $1 = TIME  $2 = END  $3 = MIN_REMAINING_MIN  $4 = CODEX
-  printf 'TIME=%s\nEND=%s\nDAYS=daily\nMODE=standard\nMIN_REMAINING_MIN=%s\nWAKE=false\nLOW_BATTERY_SKIP=false\nCALENDAR=none\nCODEX=%s\nCODEX_PROMPT=ping\n' \
+  # WORKSTART=00:00: the default 09:00 would fail "END after WORKSTART" for an
+  # END computed from the clock before 09:00
+  printf 'TIME=%s\nWORKSTART=00:00\nEND=%s\nDAYS=daily\nMODE=standard\nMIN_REMAINING_MIN=%s\nWAKE=false\nLOW_BATTERY_SKIP=false\nCALENDAR=none\nCODEX=%s\nCODEX_PROMPT=ping\n' \
     "$1" "$2" "$3" "$4" > "$CFG"
 }
 for t in claude codex; do
@@ -310,26 +312,34 @@ expect() {
 conf 00:00 23:59 0 false
 expect "first tick fires"                  "ok  anchor" claude 1
 expect "cadence not due -> no second ping" "ok  anchor" claude 1
-# due by cadence (last fire yesterday), but your own reply 3m ago opened a window
-printf '%s' "$(( $(date +%s) - 86400 ))" > "$ST/last_fire"; rm -f "$ST/fire_history"; reply 180
+# due by cadence (last fire yesterday), but your own reply 3m ago opened a window.
+# forget() rewinds our pings to yesterday; an empty fire_history (not a missing
+# one) keeps the ok lines already in the log from being backfilled.
+forget() { printf '%s' "$(( $(date +%s) - 86400 ))" > "$ST/last_fire"; : > "$ST/fire_history"; }
+forget; reply 180
 expect "open window (session log) -> no ping" "" claude 1
 rm -f "$SB/.claude/projects/p/s.jsonl"; : > "$SB/claude.fail"
 expect "failure backs off"                 "FAILED  rc=1  retry" claude 2
 grep -q 'FAILED' "$SB/applet.log" 2>/dev/null && ok "e2e: first failure notifies" || fail "e2e: first failure notifies"
 expect "back-off -> no retry yet"          "SKIP    claude: retrying failed ping" claude 2
+claude_json() { local j; j="$(run_cli status --json)"; j="${j#*\"claude\":\{}"; printf '%s' "${j%%\}*}"; }
+case "$(claude_json)" in
+  *'"retry_at":'[0-9]*) ok "e2e: status --json shows claude's pending retry";;
+  *) fail "e2e: status --json shows claude's pending retry" "$(claude_json)";;
+esac
 rm -f "$SB/claude.fail"
 if [ "$(nm)" -ge 2 ]; then   # now-60 must still be today
   now=$(date +%s); printf '1|%s|%s\n' "$(( now - 60 ))" "$(( now - 960 ))" > "$ST/fail_backoff"
   expect "retry reads as recovered"        "recovered after 1 failed"
+  case "$(claude_json)" in
+    *'"retry_at":null'*) ok "e2e: status --json clears claude's retry";;
+    *) fail "e2e: status --json clears claude's retry" "$(claude_json)";;
+  esac
 else
   skip "e2e: retry reads as recovered" "first minutes of the day"
 fi
-case "$(run_cli status --json)" in
-  *'"retry_at":null'*) ok "e2e: status --json clears retry_at";;
-  *) fail "e2e: status --json clears retry_at" "$(run_cli status --json)";;
-esac
 
-rm -f "$ST/last_fire" "$ST/fire_history" "$ST/fail_backoff" "$SB/claude.calls"
+forget; rm -f "$ST/fail_backoff" "$SB/claude.calls"
 printf '%s' "$(( $(date +%s) + 3600 ))" > "$ST/limit_until"
 expect "limit pause -> skip"               "SKIP    claude: usage limit until" claude 0
 rm -f "$ST/limit_until"
@@ -352,7 +362,7 @@ rm -f "$SB/codex.fail" "$ST/codex_fail_backoff"
 # before TIME by the real clock — skips as outside active hours
 if [ "$(nm)" -ge 1 ] && [ "$(nm)" -lt 1430 ]; then
   conf "$(hm $(( $(nm) + 2 )))" 23:59 0 false
-  rm -f "$ST/last_fire" "$ST/fire_history" "$SB/sleep.calls"
+  forget; rm -f "$SB/sleep.calls"
   export STUB_SLEEP=1
   expect "wait_for_time path runs clean"   "SKIP    all: outside active hours"
   unset STUB_SLEEP

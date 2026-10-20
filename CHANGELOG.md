@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.6-beta] — 2026-10-20
+
+### Fixed
+- Upgrading from 0.5.2 no longer misplaces the current window. 0.5.2 pings left
+  neither a session log nor `fire_history`. Until that file exists, the day's
+  successful pings are now read back from `prewarm.log`.
+- A 0.5.3 failure back-off file (`streak|retry`) now derives its failure time
+  as one back-off before the retry. A failure just before midnight no longer
+  carries its streak into the next day.
+- A failure alert now says "No retry today" when the retry falls past the
+  last possible prewarm: `END` minus `MIN_REMAINING_MIN`, not `END` itself.
+- The end-to-end guardrail test no longer fails before 08:31; it sets
+  `WORKSTART` explicitly. The `status --json` checks now read Claude's
+  `retry_at`, not either agent's.
+
 ## [0.5.5-beta] — 2026-10-20
 
 ### Fixed

@@ -91,12 +91,16 @@ late_kind() {  # $1 = now epoch; prints held (ticks ran on) or asleep
   fi
 }
 
-# Failure alert tail: a retry after END is not happening today.
+# Failure alert tail: a retry past the day's last possible prewarm (END less the
+# MIN_REMAINING_MIN guardrail) is not happening today.
 retry_text() {  # $1 = retry HH:MM
-  if [ "$(to_min "$1")" -le "$(to_min "$END")" ] && [ "$(to_min "$1")" -ge "$(to_min "$TIME")" ]; then
+  local r cutoff
+  r=$(to_min "$1"); cutoff=$(( $(to_min "$END") - MIN_REMAINING_MIN ))
+  [ "$cutoff" -ge 0 ] || cutoff=0
+  if [ "$r" -le "$cutoff" ] && [ "$r" -ge "$(to_min "$TIME")" ]; then
     echo "Retrying at $1."
   else
-    echo "No retry today (after $END)."
+    echo "No retry today (last prewarm by $(to_hm "$cutoff"))."
   fi
 }
 

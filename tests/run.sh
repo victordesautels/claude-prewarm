@@ -472,6 +472,18 @@ _reply 14400 > "$CLAUDE_PROJECTS/session.jsonl"
 printf '%s\n%s\n' "$(( WA_NOW - 25200 ))" "$(( WA_NOW - 7200 ))" > "$FIRE_HISTORY"
 printf '%s' "$(( WA_NOW - 7200 ))" > "$LAST_FIRE"
 assert_eq "ping history keeps the real boundary"   "$(( WA_NOW - 7200 ))" "$(INTERVAL=300; window_anchor)"
+# Upgraded from 0.5.2, which kept no history: the day's pings come from the log.
+_logged() { date -r "$(( WA_NOW - $1 ))" '+%Y-%m-%d %H:%M:%S'; }
+rm -f "$FIRE_HISTORY"
+{ printf '%s  ok  anchor DELAYED due=06:00 +20m  window~x\n' "$(_logged 25200)"
+  printf '%s  ok  codex boundary on-time      ping~x\n' "$(_logged 9000)"
+  printf '%s  FAILED  rc=1  retry 10:00  boom\n' "$(_logged 8000)"
+  printf '%s  ok  boundary on-time        window~x\n' "$(_logged 7200)"; } > "$LOG"
+assert_eq "no fire_history -> pings from the log"  "$(( WA_NOW - 7200 ))" "$(INTERVAL=300; window_anchor)"
+assert_eq "  ...Claude 'ok' lines only"            "$(printf '%s\n%s' "$(( WA_NOW - 25200 ))" "$(( WA_NOW - 7200 ))")" "$(pings_from_log)"
+record_ping "$WA_NOW"
+assert_eq "first record_ping keeps the logged ones" 3 "$(wc -l < "$FIRE_HISTORY" | tr -d ' ')"
+: > "$LOG"
 rm -f "$LAST_FIRE" "$FIRE_HISTORY" "$CLAUDE_PROJECTS"/*.jsonl
 
 # ---- fire: do_fire outcomes -------------------------------------------------
@@ -538,17 +550,25 @@ printf '3|%s|%s\n' "$(( FB_NOW + 172800 ))" "$FB_NOW" > "$FAIL_BACKOFF"; _fail_f
 assert_eq       "retry on another day keeps today's streak" 4 "$(cut -d'|' -f1 "$FAIL_BACKOFF")"
 printf '2|123\n' > "$FAIL_BACKOFF"
 assert_eq       "reads a 0.5.3 two-field back-off" 123 "$(read_fail_until "$FAIL_BACKOFF")"
-printf '2|%s\n' "$FB_NOW" > "$FAIL_BACKOFF"; _fail_fire
+# 0.5.3 two-field files: the failure was one back-off (30m at streak 2) before the retry
+printf '2|%s\n' "$(( FB_NOW + 1800 ))" > "$FAIL_BACKOFF"; _fail_fire
 assert_eq       "  ...and continues its streak"   3 "$(read_fail_streak "$FAIL_BACKOFF")"
+# failed yesterday 23:50, retry today 00:20: today's first failure starts afresh
+printf '2|%s\n' "$(today_epoch 00:20)" > "$FAIL_BACKOFF"; _fail_fire
+assert_eq       "  ...a pre-midnight one restarts" 1 "$(read_fail_streak "$FAIL_BACKOFF")"
+printf '2|%s\n' "$(( FB_NOW + 1800 ))" > "$FAIL_BACKOFF"; _fail_fire
 rm -f "$RT_CALLS/osascript"
 ( export STUB_CLAUDE_RC=7 STUB_CLAUDE_OUT="boom"
   MODE="standard"; INTERVAL=300; TIME="00:00"; END="23:59"; NOTIFY="true"; do_fire manual )
 assert_contains "manual failure logs 'manual'"    "$(_logtail)" "FAILED  rc=7  manual"
 assert_eq       "manual failure leaves the schedule's back-off alone" 3 "$(read_fail_streak "$FAIL_BACKOFF")"
 assert_contains "manual failure still notifies"   "$(cat "$RT_CALLS/osascript" 2>/dev/null)" "Manual ping failed"
-assert_eq       "retry inside hours -> 'Retrying at'" "Retrying at 10:15." "$(TIME=06:00; END=18:00; retry_text 10:15)"
-assert_eq       "retry after END -> no retry today"   "No retry today (after 18:00)." "$(TIME=06:00; END=18:00; retry_text 18:15)"
-assert_eq       "retry past midnight -> no retry today" "No retry today (after 18:00)." "$(TIME=06:00; END=18:00; retry_text 00:05)"
+assert_eq       "retry inside hours -> 'Retrying at'" "Retrying at 10:15." "$(TIME=06:00; END=18:00; MIN_REMAINING_MIN=60; retry_text 10:15)"
+assert_eq       "retry after the guardrail cutoff -> none today" "No retry today (last prewarm by 17:00)." \
+                "$(TIME=06:00; END=18:00; MIN_REMAINING_MIN=60; retry_text 17:10)"
+assert_eq       "retry at the cutoff -> still today" "Retrying at 17:00." "$(TIME=06:00; END=18:00; MIN_REMAINING_MIN=60; retry_text 17:00)"
+assert_eq       "retry past midnight -> none today" "No retry today (last prewarm by 18:00)." \
+                "$(TIME=06:00; END=18:00; MIN_REMAINING_MIN=0; retry_text 00:05)"
 ( export STUB_CLAUDE_RC=0 STUB_CLAUDE_OUT="pong"
   MODE="standard"; INTERVAL=300; TIME="$(date +%H:%M)"; END="23:59"; NOTIFY="false"; do_fire tick )
 assert_fail     "a clean ping clears the back-off" test -f "$FAIL_BACKOFF"

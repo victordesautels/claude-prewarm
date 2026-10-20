@@ -149,13 +149,24 @@ record_skip_once() {  # $1=agent $2=reason
 record_recovery() {  # $1=agent $2=due_epoch $3=fired_epoch $4=delay_min $5=next_epoch
   printf '%s|%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" "$5" > "$LAST_RECOVERY"
 }
-# Remember a successful ping for window_anchor: with --no-session-persistence it
-# leaves no session log. Keeps one day of entries.
+# Our own pings for window_anchor: with --no-session-persistence they leave no
+# session log. FIRE_HISTORY keeps one day of them. Until it exists (an upgrade
+# from 0.5.2, which kept neither), the day's successful pings come from the log.
+ping_history() {
+  if [ -f "$FIRE_HISTORY" ]; then cat "$FIRE_HISTORY"; else pings_from_log; fi
+}
+pings_from_log() {  # epochs of today's and yesterday's "ok" Claude pings in LOG
+  local t
+  { grep -E "^($(date +%F)|$(date -v-1d +%F)) [0-9:]{8}  ok  " "$LOG" 2>/dev/null || true; } \
+    | { grep -v "  ok  codex " || true; } | cut -c1-19 \
+    | while IFS= read -r t; do date -j -f '%Y-%m-%d %H:%M:%S' "$t" +%s 2>/dev/null || true; done
+}
 record_ping() {  # $1 = epoch
   local cut=$(( $1 - 86400 ))
-  { [ -f "$FIRE_HISTORY" ] && awk -v c="$cut" '/^[0-9]+$/ && $0 + 0 >= c' "$FIRE_HISTORY"; echo "$1"; } \
-    > "$FIRE_HISTORY.tmp" && mv "$FIRE_HISTORY.tmp" "$FIRE_HISTORY"
+  { ping_history | awk -v c="$cut" '/^[0-9]+$/ && $0 + 0 >= c' || true
+    echo "$1"; } > "$FIRE_HISTORY.tmp" && mv "$FIRE_HISTORY.tmp" "$FIRE_HISTORY"
 }
+backoff_min() { case "$1" in 1) echo 15;; 2) echo 30;; *) echo 60;; esac; }   # $1 = streak
 # A failed ping (expired login, network down, a limit message detect_limit does
 # not know) backs off 15m, 30m, then hourly, instead of retrying — and alerting —
 # on every 5-minute tick. The streak restarts on the first failure of a new day
@@ -163,14 +174,16 @@ record_ping() {  # $1 = epoch
 # clean ping deletes the file. Prints the streak length so only its first
 # failure notifies.
 record_failure() {  # $1 = backoff file  $2 = now epoch
-  local f="$1" nowE="$2" n=0 retry=0 last=0 delay
+  local f="$1" nowE="$2" n=0 retry=0 last=0
   [ -f "$f" ] && IFS='|' read -r n retry last < "$f" 2>/dev/null || true
-  [[ "$last" =~ ^[0-9]+$ ]] || last="$retry"            # 0.5.3 wrote "streak|retry"
+  # 0.5.3 wrote "streak|retry": its failure was one back-off before the retry
+  if ! [[ "$last" =~ ^[0-9]+$ ]] && [[ "$n" =~ ^[0-9]+$ ]] && [[ "$retry" =~ ^[0-9]+$ ]]; then
+    last=$(( retry - $(backoff_min "$n") * 60 ))
+  fi
   { [[ "$n" =~ ^[0-9]+$ ]] && [[ "$last" =~ ^[0-9]+$ ]]; } || { n=0; last=0; }
   [ "$last" -gt 0 ] && [ "$(epoch_day "$last")" != "$(epoch_day "$nowE")" ] && n=0
   n=$(( n + 1 ))
-  case "$n" in 1) delay=15;; 2) delay=30;; *) delay=60;; esac
-  printf '%s|%s|%s\n' "$n" "$(( nowE + delay * 60 ))" "$nowE" > "$f"
+  printf '%s|%s|%s\n' "$n" "$(( nowE + $(backoff_min "$n") * 60 ))" "$nowE" > "$f"
   echo "$n"
 }
 # Would the Claude ping be due at epoch $1, going by the usage-limit pause, the

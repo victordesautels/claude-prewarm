@@ -60,7 +60,7 @@ last_activity() {   # epoch of most recent activity; 0 if none (~10ms for 600 fi
 # Activity is every real model reply in the session logs (synthetic error/limit
 # replies excluded), not just each file's first line: that missed a resumed
 # session and one that ran across a window boundary. Our own pings leave no
-# session log (--no-session-persistence), so they come from FIRE_HISTORY; without
+# session log (--no-session-persistence), so they come from ping_history; without
 # them the replay drifts off the real window boundaries. This greps a day of logs
 # (~2s on a heavy day), so callers check the cheap cadence conditions first. Any
 # parse trouble degrades to "no open window", so we err toward firing, not gaps.
@@ -73,7 +73,7 @@ window_anchor() {
         | LC_ALL=C grep -v '"model":"<synthetic>"' \
         | LC_ALL=C grep -oE '"timestamp":"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' || true
     fi
-    [ -f "$FIRE_HISTORY" ] && cat "$FIRE_HISTORY"
+    ping_history
     read_lf
   } 2>/dev/null | awk -v cut=$(( nowE - 86400 )) '
     /^"timestamp":"/ {   # ISO-8601 UTC -> epoch via days-from-civil (BSD awk has no mktime)
