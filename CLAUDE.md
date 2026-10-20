@@ -15,7 +15,7 @@ and dependency-free.
 ## Commands
 
 ```bash
-bash tests/run.sh                     # full test suite (~4s, 246 assertions)
+bash tests/run.sh                     # full test suite (~5s, 260 assertions)
 bash tests/regression.sh              # notifier, CLI routing, and an end-to-end tick under set -euo pipefail
 ./scripts/lint.sh                     # bash -n + shellcheck + dead-code check
 git config core.hooksPath .githooks   # one-time: enable the pre-commit gate
@@ -73,9 +73,11 @@ conditions (outside active hours, wrong day, holiday/skip-date, too little time
 before `END`, low battery) → back off if a usage limit was hit (reset time
 parsed from the limit message into `limit_until`) or the last ping failed
 (`fail_backoff`) → fire only if the mode's cadence says one is due **and** no
-window is currently open. `window_anchor` replays a day of session-log replies
-plus `fire_history` (pings run with `--no-session-persistence`, so they leave no
-log) and takes ~2s, which is why it is checked after the cadence. `fire.bash`
+window is currently open. `window_anchor` replays a day of session-log requests
+(each real reply dated by the user record before it) plus `fire_history` (pings
+run with `--no-session-persistence`, so they leave no log). It takes ~4s, which
+is why it is checked after the cadence, and callers use `window_anchor_cached`,
+which reuses an open window's anchor until that window ends. `fire.bash`
 holds this decision logic; understand it before touching firing behavior.
 
 ### Three independent times
@@ -89,7 +91,7 @@ legacy `KEEPALIVE` boolean for backward compat — see the mapping in both
 ### State and config (never hardcode these paths — use the globals)
 
 - Config: `~/.config/claude-prewarm/config` (sourced shell assignments).
-- State: `~/.local/state/claude-prewarm/` — `last_fire`, `last_tick`, `fire_history`,
+- State: `~/.local/state/claude-prewarm/` — `last_fire`, `last_tick`, `fire_history`, `window_open`,
   `limit_until`, `fail_backoff`, `codex_last_fire`, `codex_fail_backoff`,
   `wake_set`, `last_skip`, `last_recovery`, logs.
 - Claude session logs it reads to detect an already-open window:

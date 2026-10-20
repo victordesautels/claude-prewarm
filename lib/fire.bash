@@ -68,7 +68,7 @@ wait_for_time() {
   { [ "$s" -gt 0 ] && [ "$s" -le "$TICK_SECONDS" ]; } || return 0
   current_skip_reason "$(to_min "$TIME")" >/dev/null && return 0
   claude_due "$t" || return 0
-  anchor=$(window_anchor)
+  anchor=$(window_anchor_cached)
   [ "${anchor:-0}" -gt 0 ] 2>/dev/null && [ $(( anchor + INTERVAL * 60 )) -gt "$t" ] && return 0
   hold_awake
   printf '%s  WAIT    %ss until %s (holding the Mac awake)\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$s" "$TIME" >> "$LOG"
@@ -81,7 +81,9 @@ wait_for_time() {
 note_tick() {
   local v; v="$(cat "$LAST_TICK" 2>/dev/null || true)"
   if [[ "$v" =~ ^[0-9]+$ ]]; then PREV_TICK="$v"; else PREV_TICK=0; fi
-  { date +%s > "$LAST_TICK"; } 2>/dev/null || true   # unwritable: lose the hint, not the tick
+  # Unwritable: lose the hint, not the tick — and treat the previous tick as
+  # unknown, or the frozen stamp would make every late fire "Mac was asleep".
+  { date +%s > "$LAST_TICK"; } 2>/dev/null || PREV_TICK=0
 }
 late_kind() {  # $1 = now epoch; prints held (ticks ran on), asleep, or unknown
   if [ "${PREV_TICK:-0}" -eq 0 ]; then
@@ -94,6 +96,23 @@ late_kind() {  # $1 = now epoch; prints held (ticks ran on), asleep, or unknown
 }
 late_note() {  # $1 = late_kind (held|unknown): the log's reason for a late, alert-free fire
   if [ "$1" = "held" ]; then echo "window open or skipped"; else echo "first tick, cause unknown"; fi
+}
+
+# A boundary that comes due within the next minute or so is waited for, not left
+# to the next tick. last_fire is stamped a second or more into its tick (after
+# window_anchor), so on launchd's steady 300s phase the tick 5h on checked a hair
+# early and every boundary fired 5 minutes late (e.g. 06:24:19 -> 11:29:19). The
+# wait ends 10s past due: the ping must reach the API after the old window ends,
+# and claude may start a second or two faster than last time.
+wait_for_boundary() {
+  [ "$MODE" = "standard" ] || return 0
+  local lf s
+  lf=$(read_lf)
+  { [ "$lf" -gt 0 ] && [ "$(date -r "$lf" '+%Y%m%d')" = "$(date '+%Y%m%d')" ]; } || return 0
+  s=$(( lf + $(mode_interval_min) * 60 + 10 - $(date +%s) ))
+  { [ "$s" -gt 0 ] && [ "$s" -le 70 ]; } || return 0
+  hold_awake
+  sleep "$s"
 }
 
 # Failure alert tail: a retry past the day's last possible prewarm (END less the
@@ -137,7 +156,7 @@ do_fire() {  # $1 = tick | manual
   # Manual only (a tick fires only when cmd_tick found no open window): is a real
   # usage window open right now (from your work OR our pings)? Its true start is
   # the current window's FIRST message — not our last ping.
-  if [ "$mode" = "manual" ]; then anchor=$(window_anchor); [ "$anchor" -gt 0 ] && win_open=1; fi
+  if [ "$mode" = "manual" ]; then anchor=$(window_anchor_cached); [ "$anchor" -gt 0 ] && win_open=1; fi
 
   if [ "$mode" = "tick" ]; then
     # delay = how late THIS fire is vs. when our cadence expected it (sleep detection),
@@ -177,7 +196,7 @@ do_fire() {  # $1 = tick | manual
   if reset_epoch="$(detect_limit "$out")"; then
     local resume until_txt fmt='+%H:%M'
     if [ "$reset_epoch" -gt 0 ]; then resume="$reset_epoch"
-    else resume=$(( nowE + INTERVAL * 60 )); fi
+    else resume=$(( ${TICK_NOW:-$nowE} + INTERVAL * 60 )); fi   # from the tick's phase, so the tick then resumes
     # spell out the day when the reset is not today, so "until 15:00" can't read as "soon"
     [ "$(date -r "$resume" '+%Y%m%d')" != "$(date '+%Y%m%d')" ] && fmt='+%b %-d %H:%M'
     until_txt="$(date -r "$resume" "$fmt")"
@@ -197,6 +216,7 @@ do_fire() {  # $1 = tick | manual
   if [ "$rc" -ne 0 ]; then
     streak=$(record_failure "$FAIL_BACKOFF" "${TICK_NOW:-$nowE}")
     retry_at="$(date -r "$(read_fail_until "$FAIL_BACKOFF")" '+%H:%M')"
+    [ "$streak" -gt 0 ] || retry_at="?? (state not writable)"
     printf '%s  FAILED  rc=%s  retry %s  %s\n' "$ts" "$rc" "$retry_at" "${out:0:140}" >> "$LOG"
     if [ "$streak" -eq 1 ]; then
       notify alert "Claude prewarm - FAILED" "Ping failed (rc=$rc) at $win_start. $(retry_text "$retry_at")"
@@ -291,7 +311,7 @@ do_codex_fire() {  # $1 = tick | manual
   if reset_epoch="$(detect_limit "$out")"; then
     local resume until_txt fmt='+%H:%M'
     if [ "$reset_epoch" -gt 0 ]; then resume="$reset_epoch"
-    else resume=$(( nowE + INTERVAL * 60 )); fi
+    else resume=$(( ${TICK_NOW:-$nowE} + INTERVAL * 60 )); fi
     [ "$(date -r "$resume" '+%Y%m%d')" != "$(date '+%Y%m%d')" ] && fmt='+%b %-d %H:%M'
     until_txt="$(date -r "$resume" "$fmt")"
     [ "$reset_epoch" -gt 0 ] || until_txt="~$until_txt"
@@ -311,6 +331,7 @@ do_codex_fire() {  # $1 = tick | manual
   if [ "$rc" -ne 0 ]; then
     streak=$(record_failure "$CODEX_FAIL_BACKOFF" "${TICK_NOW:-$nowE}")
     retry_at="$(date -r "$(read_fail_until "$CODEX_FAIL_BACKOFF")" '+%H:%M')"
+    [ "$streak" -gt 0 ] || retry_at="?? (state not writable)"
     printf '%s  CODEX FAILED  rc=%s  retry %s  %s\n' "$ts" "$rc" "$retry_at" "${out:0:140}" >> "$LOG"
     if [ "$streak" -eq 1 ]; then
       notify alert "Codex prewarm - FAILED" "Codex ping failed (rc=$rc) at $ping_start. $(retry_text "$retry_at")"
@@ -320,7 +341,9 @@ do_codex_fire() {  # $1 = tick | manual
   fi
 
   rm -f "$CODEX_LIMIT_UNTIL" "$CODEX_FAIL_BACKOFF"
-  echo "$nowE" > "$CODEX_LAST_FIRE"
+  # The tick's time, not this ping's: Codex runs after Claude's ping, seconds or
+  # minutes into the tick, and has no window for an early boundary to clash with.
+  echo "${TICK_NOW:-$nowE}" > "$CODEX_LAST_FIRE"
 
   if [ "$mode" = "manual" ]; then
     printf '%s  ok  codex manual          ping~%s-%s\n' "$ts" "$ping_start" "$ping_end" >> "$LOG"
@@ -370,11 +393,11 @@ cmd_tick() {
     record_skip_once "claude" "usage limit until $(date -r "$lu" '+%H:%M')"
   elif retry_pending "$FAIL_BACKOFF" "$nowE"; then
     record_skip_once "claude" "retrying failed ping at $(date -r "$fu" '+%H:%M')"
-  elif claude_due "$nowE"; then
+  elif claude_due "$nowE" || { wait_for_boundary && claude_due "$(date '+%s')"; }; then
     # Cadence first: window_anchor greps a day of session logs, so only look for
     # an open window (its FIRST message < INTERVAL ago, your work OR our ping)
-    # once a fire is due.
-    anchor=$(window_anchor)
+    # once a fire is due — and reuse it while that window lasts.
+    anchor=$(window_anchor_cached)
     [ "${anchor:-0}" -gt 0 ] 2>/dev/null || do_fire tick
   fi
 

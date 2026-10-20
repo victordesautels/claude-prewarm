@@ -31,7 +31,7 @@
 #
 set -euo pipefail
 
-VERSION="0.5.8-beta"
+VERSION="0.5.9-beta"
 LABEL="com.claude-prewarm"
 AWAKE_LABEL="com.claude-prewarm.awake"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
@@ -50,6 +50,7 @@ LAST_RECOVERY="$STATE_DIR/last_recovery"
 WAKE_AC_WARNED="$STATE_DIR/wake_ac_warned"   # target date already warned about (wake needs AC)
 FIRE_HISTORY="$STATE_DIR/fire_history"       # epochs of the last day's pings (they leave no session log)
 LAST_TICK="$STATE_DIR/last_tick"             # epoch of the latest tick (was the Mac asleep before a late fire?)
+WINDOW_CACHE="$STATE_DIR/window_open"        # "anchor interval_s" of a window found open (tick reuse)
 FAIL_BACKOFF="$STATE_DIR/fail_backoff"       # "streak|retry_epoch" after a failed ping
 CODEX_FAIL_BACKOFF="$STATE_DIR/codex_fail_backoff"
 CLAUDE_PROJECTS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"   # Claude Code session logs
@@ -83,13 +84,18 @@ STAYAWAKE="false"   # no-sudo caffeinate: keep Mac awake WORKSTART..END
 NOTIFY="true"       # true = all fires | delayed = only late/failed | false = none
 
 mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$HOME/Library/LaunchAgents"
-# shellcheck disable=SC1090
-[ -f "$CONFIG" ] && source "$CONFIG"
-[ -n "${MODE:-}" ] || { [ "$KEEPALIVE" = "true" ] && MODE="standard" || MODE="daily"; }
-# migrate legacy/retired mode names from older configs
-case "$MODE" in aggressive|coverage) MODE="standard";; conserve) MODE="daily";; esac
-case "$MODE" in standard) KEEPALIVE="true";; daily|manual) KEEPALIVE="false";; esac
-CODEX_PROMPT="${CODEX_PROMPT:-$PROMPT}"
+# Parse-check before sourcing: a syntax error in a sourced file exits the shell
+# outright under set -e, which would take down `config edit` (the fix) and kill
+# every tick silently. A broken config is set aside and handled at dispatch.
+CONFIG_BROKEN=0
+if [ -f "$CONFIG" ]; then
+  if "$BASH" -n "$CONFIG" 2>/dev/null; then
+    # shellcheck disable=SC1090
+    source "$CONFIG"
+  else
+    CONFIG_BROKEN=1
+  fi
+fi
 
 # Install location. SHARE_DIR holds libs, assets, and the notifier app; both are
 # overridable so the tool relocates cleanly (e.g. a Homebrew Cellar prefix).
@@ -110,6 +116,7 @@ for _lib in \
   # shellcheck disable=SC1090
   . "$LIB_DIR/$_lib"
 done
+normalize_config
 unset _lib
 
 # ---- dispatch ----------------------------------------------------------------
@@ -129,6 +136,21 @@ if [ $# -eq 0 ] && [ ! -f "$CONFIG" ] && [ -t 0 ] && [ -t 1 ]; then
   fi
   printf '%s\n' "$(dim 'When ready: claude-prewarm install   ·   all commands: claude-prewarm --help')" >&2
   exit 0
+fi
+
+# A config bash cannot parse: ticks pause (alerting once a day) rather than ping
+# on defaults; every other command warns and runs on defaults, so `config edit`
+# can repair it.
+if [ "$CONFIG_BROKEN" = 1 ]; then
+  if [ "${1:-}" = "tick" ]; then
+    note_tick
+    if ! grep -q "^$(date '+%Y%m%d')|all|config has a syntax error" "$LAST_SKIP" 2>/dev/null; then
+      notify alert "Claude prewarm - config error" "The config has a syntax error, so prewarms are paused. Fix it with: claude-prewarm config edit"
+    fi
+    record_skip_once "all" "config has a syntax error"
+    exit 0
+  fi
+  printf '%s\n' "$(yellow "warning: $CONFIG has a syntax error; using defaults. Fix it with: claude-prewarm config edit")" >&2
 fi
 
 case "${1:-help}" in

@@ -4,6 +4,42 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.9-beta] — 2026-10-20
+
+### Fixed
+- Window detection dates each model reply by its request, the session record
+  just before it, not by when the reply streamed back. A request sent just
+  inside a window whose reply landed just past its end no longer invents a new
+  5-hour window that holds back the next ping.
+- Window detection reads only each record's own top-level timestamp (the one
+  right after its `uuid`). It ignores a `timestamp` nested in tool-call
+  arguments, and anything dated in the future.
+- An open window's anchor is now cached until that window ends. Reading every
+  record costs ~4s on a heavy day, and a tick held back by your own window
+  used to repeat that every 5 minutes.
+- A 5-hour boundary no longer fires a tick (5 minutes) late. `last_fire` is
+  stamped a second or more into its tick, so on launchd's steady 5-minute phase
+  the tick 5 hours on checked a hair early (e.g. 06:24:19 to 11:29:19). A
+  boundary due within the next minute is now waited for, to 10s past due so the
+  ping clears the old window's end. Codex's cadence and a usage-limit pause
+  with no parsed reset time are stamped from the tick's start for the same
+  reason.
+- `prewarm.log` is no longer parsed for pings at all. Its stamps are local time
+  with no UTC offset, and even the one-time import misread them from a shell in
+  another `TZ`. Pings from 0.5.1 and older left session logs, which window
+  detection reads directly.
+- A config with a syntax error no longer kills every invocation at startup.
+  Ticks pause and alert once a day, other commands warn and run on defaults,
+  and `config edit` reverts a broken edit instead of crashing before it can.
+- `config edit` no longer rejects, and reverts, every edit to a config that
+  still says `MODE=aggressive` (or another retired mode name). The edited file
+  now gets the same migration as at startup.
+- An unwritable `fail_backoff` or `last_tick` no longer causes repeated false
+  alerts. The failure is logged without an alert, and the previous tick counts
+  as unknown.
+- A dated reset ("resets Oct 27, 6am", a weekly limit) pauses until that day,
+  not until the next 6am.
+
 ## [0.5.8-beta] — 2026-10-20
 
 ### Fixed

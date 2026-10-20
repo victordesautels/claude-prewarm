@@ -151,26 +151,15 @@ record_recovery() {  # $1=agent $2=due_epoch $3=fired_epoch $4=delay_min $5=next
   printf '%s|%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" "$5" > "$LAST_RECOVERY"
 }
 # Our own pings for window_anchor: with --no-session-persistence they leave no
-# session log. FIRE_HISTORY keeps one day of them as exact epochs. Only while it
-# does not exist yet (an upgrade from 0.5.2, which kept neither) do the day's
-# "ok" lines in the log stand in, and the first record_ping imports them once.
-# The log is never merged beside a history: its stamps are local time with no
-# UTC offset, so a shell in another TZ, a trip, or the fall-back hour reads them
-# back hours off, as phantom pings that misplace the window.
-ping_history() {
-  if [ -f "$FIRE_HISTORY" ]; then cat "$FIRE_HISTORY"; else pings_from_log; fi
-}
-pings_from_log() {  # epochs of today's and yesterday's "ok" Claude pings in LOG
-  local t
-  # -a: one NUL byte (a crash mid-write) would make BSD grep call the log binary
-  { grep -aE "^($(date +%F)|$(date -v-1d +%F)) [0-9:]{8}  ok  " "$LOG" 2>/dev/null || true; } \
-    | { grep -av "  ok  codex " || true; } | cut -c1-19 \
-    | while IFS= read -r t; do date -j -f '%Y-%m-%d %H:%M:%S' "$t" +%s 2>/dev/null || true; done
-}
+# session log. FIRE_HISTORY keeps one day of them as exact epochs. (Pings from
+# 0.5.1 and older left session logs, which window_anchor reads directly. The log
+# is never parsed for pings: its stamps are local time with no UTC offset, so a
+# shell in another TZ, a trip, or the fall-back hour reads them back hours off.)
+ping_history() { cat "$FIRE_HISTORY" 2>/dev/null || true; }
 record_ping() {  # $1 = epoch
   local cut=$(( $1 - 86400 ))
   { ping_history | awk -v c="$cut" '/^[0-9]+$/ && $0 + 0 >= c' || true
-    echo "$1"; } > "$FIRE_HISTORY.tmp" && mv "$FIRE_HISTORY.tmp" "$FIRE_HISTORY"
+    echo "$1"; } > "$FIRE_HISTORY.tmp" 2>/dev/null && mv "$FIRE_HISTORY.tmp" "$FIRE_HISTORY" || true
 }
 backoff_min() { case "$1" in 1) echo 15;; 2) echo 30;; *) echo 60;; esac; }   # $1 = streak
 # A failed ping (expired login, network down, a limit message detect_limit does
@@ -189,7 +178,9 @@ record_failure() {  # $1 = backoff file  $2 = now epoch
   { [[ "$n" =~ ^[0-9]+$ ]] && [[ "$last" =~ ^[0-9]+$ ]]; } || { n=0; last=0; }
   [ "$last" -gt 0 ] && [ "$(epoch_day "$last")" != "$(epoch_day "$nowE")" ] && n=0
   n=$(( n + 1 ))
-  { printf '%s|%s|%s\n' "$n" "$(( nowE + $(backoff_min "$n") * 60 ))" "$nowE" > "$f"; } 2>/dev/null || true
+  # Unwritable back-off file: print 0 (no streak), so the caller logs the
+  # failure without alerting — the stuck file would otherwise re-alert every tick.
+  { printf '%s|%s|%s\n' "$n" "$(( nowE + $(backoff_min "$n") * 60 ))" "$nowE" > "$f"; } 2>/dev/null || n=0
   echo "$n"
 }
 # Would the Claude ping be due at epoch $1, going by the usage-limit pause, the
@@ -236,7 +227,8 @@ json_num_or_null() {
 # am/pm time over a bare colon time. Recognizes "3pm", "3:30 PM", "15:00". rc 1 if
 # nothing parseable.
 parse_reset_epoch() {   # $1 = message
-  local msg="$1" scope h m ap hm base now
+  local msg="$1" scope h m ap hm base now mon day yr
+  local re_date='(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?[[:space:]]+([0-9]{1,2})(st|nd|rd|th)?([,[:space:]]|$)'
   case "$msg" in *[Rr]eset*) scope="${msg#*[Rr]eset}";; *) scope="$msg";; esac
   if   [[ "$scope" =~ ([0-9]{1,2}):([0-9]{2})[[:space:]]*([AaPp][Mm]) ]]; then   # H:MM am/pm
     h=${BASH_REMATCH[1]}; m=${BASH_REMATCH[2]}; ap="${BASH_REMATCH[3]}"
@@ -251,8 +243,18 @@ parse_reset_epoch() {   # $1 = message
   esac
   [ "$((10#$h))" -ge 0 ] && [ "$((10#$h))" -le 23 ] || return 1
   hm="$(printf '%02d:%02d:00' "$((10#$h))" "$((10#$m))")"
-  base="$(date -j -f '%Y-%m-%d %H:%M:%S' "$(date +%F) $hm" +%s 2>/dev/null)" || return 1
   now=$(date +%s)
+  # A dated reset ("resets Oct 27, 6am", a weekly limit) is that day, not the
+  # next 6am — which would resume, hit the limit, and re-alert every morning.
+  if [[ "$scope" =~ $re_date ]]; then
+    mon=${BASH_REMATCH[1]}; day=$(( 10#${BASH_REMATCH[2]} )); yr=$(date +%Y)
+    base="$(LC_ALL=C date -j -f '%b %d %Y %H:%M:%S' "$mon $day $yr $hm" +%s 2>/dev/null)" || return 1
+    if [ "$base" -le "$now" ]; then   # "Jan 2" seen in late December
+      base="$(LC_ALL=C date -j -f '%b %d %Y %H:%M:%S' "$mon $day $(( yr + 1 )) $hm" +%s 2>/dev/null)" || return 1
+    fi
+    echo "$base"; return 0
+  fi
+  base="$(date -j -f '%Y-%m-%d %H:%M:%S' "$(date +%F) $hm" +%s 2>/dev/null)" || return 1
   # reset is later today or tomorrow; parse tomorrow's date rather than adding
   # 86400, which lands an hour off across a DST change
   if [ "$base" -le "$now" ]; then
@@ -322,6 +324,17 @@ validate_config() {
   [ "$(to_min "$END")" -gt "$(to_min "$WORKSTART")" ] || die "END ($END) must be after WORKSTART ($WORKSTART)"
   [ "$CODEX" != "true" ] || [ -n "$CODEX_PROMPT" ] || die "CODEX_PROMPT cannot be empty when CODEX=true"
   [ -n "$(weekday_nums)" ] || die "DAYS selected no valid days (got '$DAYS')"
+}
+
+# After sourcing a config: derive MODE for configs older than modes, migrate
+# retired mode names (aggressive/coverage/conserve), and keep KEEPALIVE in step.
+# Runs at startup and after `config edit`, so an untouched legacy MODE line
+# cannot fail validation there.
+normalize_config() {
+  [ -n "${MODE:-}" ] || { [ "$KEEPALIVE" = "true" ] && MODE="standard" || MODE="daily"; }
+  case "$MODE" in aggressive|coverage) MODE="standard";; conserve) MODE="daily";; esac
+  case "$MODE" in standard) KEEPALIVE="true";; daily|manual) KEEPALIVE="false";; esac
+  CODEX_PROMPT="${CODEX_PROMPT:-$PROMPT}"
 }
 
 save_config() {   # %q round-trips arbitrary content safely (quotes, $(), spaces)

@@ -292,8 +292,8 @@ calls() { cat "$SB/$1.calls" 2>/dev/null | wc -l | tr -d ' '; }
 last() { tail -n1 "$ST/prewarm.log" 2>/dev/null; }
 nm() { echo $(( 10#$(date +%H) * 60 + 10#$(date +%M) )); }
 hm() { printf '%02d:%02d' $(( $1 / 60 )) $(( $1 % 60 )); }
-reply() {  # an API reply $1 seconds ago in the sandbox session logs
-  printf '{"type":"assistant","timestamp":"%s","message":{"model":"claude-opus"}}\n' \
+reply() {  # an API reply $1 seconds ago in the sandbox session logs, shaped like Claude Code's
+  printf '{"parentUuid":null,"type":"assistant","message":{"model":"claude-opus","content":[]},"uuid":"00000000-0000-4000-8000-000000000001","timestamp":"%s"}\n' \
     "$(date -u -r "$(( $(date +%s) - $1 ))" '+%Y-%m-%dT%H:%M:%S.000Z')" > "$SB/.claude/projects/p/s.jsonl"
 }
 # expect NAME PATTERN [STUB COUNT]: one tick must exit 0, its last log line must
@@ -315,10 +315,10 @@ expect "cadence not due -> no second ping" "ok  anchor" claude 1
 # due by cadence (last fire two days ago), but your own reply 3m ago opened a
 # window. forget() drops every trace of our earlier pings: last_fire,
 # fire_history, and the log's ok lines (merged into the window replay).
-forget() { printf '%s' "$(( $(date +%s) - 172800 ))" > "$ST/last_fire"; : > "$ST/fire_history"; : > "$ST/prewarm.log"; }
+forget() { printf '%s' "$(( $(date +%s) - 172800 ))" > "$ST/last_fire"; : > "$ST/fire_history"; : > "$ST/prewarm.log"; rm -f "$ST/window_open"; }
 forget; reply 180
 expect "open window (session log) -> no ping" "" claude 1
-rm -f "$SB/.claude/projects/p/s.jsonl"; : > "$SB/claude.fail"
+rm -f "$SB/.claude/projects/p/s.jsonl" "$ST/window_open"; : > "$SB/claude.fail"   # the window ends with its log
 expect "failure backs off"                 "FAILED  rc=1  retry" claude 2
 grep -q 'FAILED' "$SB/applet.log" 2>/dev/null && ok "e2e: first failure notifies" || fail "e2e: first failure notifies"
 expect "back-off -> no retry yet"          "SKIP    claude: retrying failed ping" claude 2
@@ -373,6 +373,41 @@ if in2; then
 else
   skip "e2e: wait_for_time path" "now+2min is not 2 minutes away (DST change or midnight)"
 fi
+# a boundary due within the minute is waited for (sleep stubbed): the path runs
+# clean under strict mode and asks to sleep until 10s past due
+if [ "$(nm)" -ge 302 ]; then
+  conf 00:00 23:59 0 false; forget; rm -f "$SB/sleep.calls" "$SB/claude.calls"
+  printf '%s' "$(( $(date +%s) - 18000 + 30 ))" > "$ST/last_fire"
+  export STUB_SLEEP=1
+  expect "boundary-wait path runs clean"    "" claude 0
+  unset STUB_SLEEP
+  [ -s "$SB/sleep.calls" ] && ok "e2e: waited for the boundary" || fail "e2e: waited for the boundary" "$(tail -n2 "$ST/prewarm.log")"
+else
+  skip "e2e: boundary-wait path" "before 05:02"
+fi
+
+# A config bash cannot parse: ticks pause and alert once a day instead of dying
+# at startup; other commands warn and run on defaults; `config edit` reverts a
+# broken edit and accepts an untouched legacy MODE=aggressive line.
+conf 00:00 23:59 0 false; forget; rm -f "$SB/applet.log" "$SB/claude.calls" "$ST/last_skip"
+printf 'TIME=06:00\nEND=17:00 (oops\n' > "$CFG"
+expect "broken config: tick pauses"        "SKIP    all: config has a syntax error" claude 0
+expect "  ...and stays quiet the next tick" "SKIP    all: config has a syntax error" claude 0
+[ "$(grep -c 'config error' "$SB/applet.log" 2>/dev/null)" = 1 ] && ok "e2e: broken config alerts once" \
+  || fail "e2e: broken config alerts once" "$(cat "$SB/applet.log" 2>/dev/null)"
+case "$(run_cli config get)" in *"syntax error"*"END=17:00 (oops"*) ok "e2e: config get warns, still runs";;
+  *) fail "e2e: config get warns, still runs" "$(run_cli config get)";; esac
+printf '#!/bin/bash\nprintf "%%b" "$EDIT_TO" > "$1"\n' > "$SB/bin/fake-editor"; chmod +x "$SB/bin/fake-editor"
+conf 00:00 23:59 0 false
+EDIT_TO='TIME=06:00\nEND=17:00 (oops\n' EDITOR="$SB/bin/fake-editor" run_cli config edit >/dev/null; erc=$?
+grep -q 'END=23:59' "$CFG" && [ "$erc" -ne 0 ] && ok "e2e: config edit reverts a syntax error" \
+  || fail "e2e: config edit reverts a syntax error" "rc=$erc $(cat "$CFG")"
+EDIT_TO='TIME=06:00\nWORKSTART=00:00\nEND=18:00\nMODE=aggressive\nDAYS=daily\nCALENDAR=none\nWAKE=false\n' \
+  EDITOR="$SB/bin/fake-editor" run_cli config edit >/dev/null; erc=$?
+grep -q 'END=18:00' "$CFG" && grep -q 'MODE=standard' "$CFG" && [ "$erc" -eq 0 ] \
+  && ok "e2e: config edit keeps a legacy MODE=aggressive (migrated)" \
+  || fail "e2e: config edit keeps a legacy MODE=aggressive (migrated)" "rc=$erc $(cat "$CFG")"
+
 # uninstall forgets last_tick, so a reinstall's first late fire isn't read as a sleeping Mac
 printf '1\n' > "$ST/last_tick"
 run_cli uninstall -y >/dev/null || true

@@ -190,7 +190,7 @@ cmd_status() {
   local loaded="no" awake_loaded="no" lf clf act anchor n nowE elapsed lu clu fu cfu skip="" next_due=0 cnext_due=0 binfo bsrc bpct rec="" lskip=""
   agent_loaded "$LABEL"       && loaded="yes"
   agent_loaded "$AWAKE_LABEL" && awake_loaded="yes"
-  lf=$(read_lf); clf=$(read_codex_lf); act=$(last_activity); anchor=$(window_anchor)
+  lf=$(read_lf); clf=$(read_codex_lf); act=$(last_activity); anchor=$(window_anchor_cached)
   n=$(now_min); nowE=$(date '+%s'); lu=$(read_limit_until); clu=$(read_codex_limit_until)
   fu=$(read_fail_until "$FAIL_BACKOFF"); cfu=$(read_fail_until "$CODEX_FAIL_BACKOFF")
   [ "$fu" -gt "$nowE" ] || fu=0; [ "$cfu" -gt "$nowE" ] || cfu=0   # a passed retry time is not pending
@@ -299,8 +299,15 @@ cmd_config() {
     edit)        local o_t="$TIME" o_w="$WAKE" o_d="$DAYS"
                  cp "$CONFIG" "$CONFIG.bak" 2>/dev/null || true
                  "${EDITOR:-vi}" "$CONFIG"
+                 # parse-check first: sourcing a syntax error would exit before the revert
+                 if [ -f "$CONFIG" ] && ! "$BASH" -n "$CONFIG" 2>/dev/null; then
+                   echo "syntax error in the edit — reverting to previous config."
+                   [ -f "$CONFIG.bak" ] && mv "$CONFIG.bak" "$CONFIG"
+                   exit 2
+                 fi
                  # shellcheck disable=SC1090
                  [ -f "$CONFIG" ] && source "$CONFIG"
+                 normalize_config
                  if ! ( validate_config ) 2>&1; then
                    echo "invalid edit — reverting to previous config."
                    [ -f "$CONFIG.bak" ] && mv "$CONFIG.bak" "$CONFIG"

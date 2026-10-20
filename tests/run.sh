@@ -231,6 +231,10 @@ SPEND_EPOCH="$(detect_limit "You've hit your org's monthly spend limit · run /u
 assert_ok   "org spend limit -> reset epoch"     _is_pos_int "$SPEND_EPOCH"
 assert_eq   "  ...parsed as the next 06:00:00"   "06:00:00" "$(date -r "${SPEND_EPOCH:-0}" '+%H:%M:%S')"
 assert_fail "'hit your' without 'limit' is not a limit" detect_limit "Looks like the ping hit your server"
+# a dated reset is that day, not the next occurrence of the clock time
+DATED_EPOCH="$(detect_limit "You've hit your weekly limit · resets Oct 27, 6am (America/Toronto)")"
+assert_eq   "dated reset -> that day"            "Oct 27 06:00" "$(date -r "${DATED_EPOCH:-0}" '+%b %-d %H:%M')"
+assert_ok   "  ...in the future"                 test "${DATED_EPOCH:-0}" -gt "$(date +%s)"
 
 section "today_epoch"
 assert_eq   "lands on the minute (no stray seconds)" 0 "$(( $(today_epoch 06:00) % 60 ))"
@@ -297,6 +301,7 @@ WAKE_MARK="$STATE_DIR/wake_set"
 WAKE_AC_WARNED="$STATE_DIR/wake_ac_warned"
 FIRE_HISTORY="$STATE_DIR/fire_history"
 LAST_TICK="$STATE_DIR/last_tick"
+WINDOW_CACHE="$STATE_DIR/window_open"
 FAIL_BACKOFF="$STATE_DIR/fail_backoff"
 CODEX_FAIL_BACKOFF="$STATE_DIR/codex_fail_backoff"
 CLAUDE_PROJECTS="$RT_SANDBOX/claude_projects"; mkdir -p "$CLAUDE_PROJECTS"  # empty => no open window
@@ -344,7 +349,7 @@ exit 0'
 PATH="$STUB_BIN:$PATH"; export PATH
 
 _logtail()    { tail -n1 "$LOG" 2>/dev/null; }
-_reset_fire() { : > "$LOG"; rm -f "$LAST_FIRE" "$LIMIT_UNTIL" "$LAST_SKIP" "$FIRE_HISTORY" "$FAIL_BACKOFF" "$RT_CALLS/claude"; rm -rf "$STATE_DIR/fire.lock"; PREV_TICK=0; }
+_reset_fire() { : > "$LOG"; rm -f "$LAST_FIRE" "$LIMIT_UNTIL" "$LAST_SKIP" "$FIRE_HISTORY" "$FAIL_BACKOFF" "$WINDOW_CACHE" "$RT_CALLS/claude"; rm -rf "$STATE_DIR/fire.lock"; PREV_TICK=0; }
 _reset_codex(){ : > "$LOG"; rm -f "$CODEX_LAST_FIRE" "$CODEX_LIMIT_UNTIL" "$CODEX_FAIL_BACKOFF" "$RT_CALLS/codex"; rm -rf "$STATE_DIR/codex.fire.lock"; }
 # Tests that set TIME to "now ± N minutes" by the wall clock: skip them while
 # those wall-clock times are not really N minutes from now — across a DST change
@@ -467,14 +472,33 @@ section "time_state: window_anchor"
 rm -f "$LAST_FIRE" "$FIRE_HISTORY" "$CLAUDE_PROJECTS"/*.jsonl
 WA_NOW=$(date +%s)
 _iso() { date -u -r "$(( WA_NOW - $1 ))" '+%Y-%m-%dT%H:%M:%S.000Z'; }   # $1 = seconds ago
-_reply() { printf '{"type":"assistant","timestamp":"%s","message":{"model":"%s"}}\n' "$(_iso "$1")" "${2:-claude-opus}"; }
+# a session record shaped like Claude Code's: top-level "uuid","timestamp" after
+# the message. $1 = user|assistant  $2 = seconds ago  $3 = model  $4 = extra content
+_rec() {
+  printf '{"parentUuid":null,"isSidechain":false,"type":"%s","message":{"role":"%s","model":"%s","content":[%s]},"uuid":"00000000-0000-4000-8000-%012d","timestamp":"%s"}\n' \
+    "$1" "$1" "${3:-claude-opus}" "${4:-}" "$RANDOM" "$(_iso "$2")"
+}
+_reply() { _rec assistant "$1" "${2:-claude-opus}"; }
 assert_eq "no logs + no last-fire -> anchor 0"     0 "$(INTERVAL=300; window_anchor)"
 _reply 180 > "$CLAUDE_PROJECTS/session.jsonl"
 assert_eq "reply 3m ago -> window opened then"     "$(( WA_NOW - 180 ))" "$(INTERVAL=300; window_anchor)"
 _reply 21600 > "$CLAUDE_PROJECTS/session.jsonl"
 assert_eq "6h-old reply (5h window) -> closed"     0 "$(INTERVAL=300; window_anchor)"
-printf '{"type":"user","timestamp":"%s"}\n' "$(_iso 180)" > "$CLAUDE_PROJECTS/session.jsonl"
+_rec user 180 > "$CLAUDE_PROJECTS/session.jsonl"
 assert_eq "user line alone (no API reply) -> closed" 0 "$(INTERVAL=300; window_anchor)"
+# A reply is dated by its request (the user record before it): a request sent
+# inside the 06:00-11:00 window whose reply streams back just after 11:00 opens
+# no new window. Ping 5h10m ago, request 10m10s ago... reply 9m50s ago.
+printf '%s\n' "$(( WA_NOW - 18600 ))" > "$FIRE_HISTORY"
+{ _rec user 610; _reply 590; } > "$CLAUDE_PROJECTS/session.jsonl"
+assert_eq "reply past the boundary, request inside -> closed" 0 "$(INTERVAL=300; window_anchor)"
+rm -f "$FIRE_HISTORY"
+# Only the record's own timestamp counts: not a "timestamp" nested in tool-call
+# arguments, and nothing in the future (a tool call scheduling 18:00 at 10:00).
+_rec assistant 21600 claude-opus "{\"type\":\"tool_use\",\"input\":{\"timestamp\":\"$(_iso 120)\"}}" > "$CLAUDE_PROJECTS/session.jsonl"
+assert_eq "timestamp nested in tool args -> ignored" 0 "$(INTERVAL=300; window_anchor)"
+_reply -3600 > "$CLAUDE_PROJECTS/session.jsonl"
+assert_eq "record dated in the future -> ignored" 0 "$(INTERVAL=300; window_anchor)"
 _reply 180 '<synthetic>' > "$CLAUDE_PROJECTS/session.jsonl"
 assert_eq "synthetic error reply -> closed"        0 "$(INTERVAL=300; window_anchor)"
 # a session started yesterday and resumed today: its first line is old, but the
@@ -487,39 +511,35 @@ _reply 14400 > "$CLAUDE_PROJECTS/session.jsonl"
 printf '%s\n%s\n' "$(( WA_NOW - 25200 ))" "$(( WA_NOW - 7200 ))" > "$FIRE_HISTORY"
 printf '%s' "$(( WA_NOW - 7200 ))" > "$LAST_FIRE"
 assert_eq "ping history keeps the real boundary"   "$(( WA_NOW - 7200 ))" "$(INTERVAL=300; window_anchor)"
-# Upgraded from 0.5.2, which kept no history: the day's logged pings stand in
-# until fire_history exists, and the first record_ping imports them. Log times
-# are local, so on the fall-back day an hour can read back an hour off; skip
-# the exact checks then.
-_logged() { date -r "$(( WA_NOW - $1 ))" '+%Y-%m-%d %H:%M:%S'; }
-_roundtrips() { local s; for s in "$@"; do
-  [ "$(date -j -f '%Y-%m-%d %H:%M:%S' "$(_logged "$s")" +%s)" = "$(( WA_NOW - s ))" ] || return 1; done; }
-if _roundtrips 25200 7200; then
-  { printf '%s  ok  anchor DELAYED due=06:00 +20m  window~x\n' "$(_logged 25200)"
-    printf '%s  ok  codex boundary on-time      ping~x\n' "$(_logged 9000)"
-    printf '%s  FAILED  rc=1  retry 10:00  boom\n' "$(_logged 8000)"
-    printf '%s  ok  boundary on-time        window~x\n' "$(_logged 7200)"; } > "$LOG"
-  rm -f "$FIRE_HISTORY"
-  assert_eq "no fire_history -> pings from the log" "$(( WA_NOW - 7200 ))" "$(INTERVAL=300; window_anchor)"
-  assert_eq "  ...Claude 'ok' lines only"           "$(printf '%s\n%s' "$(( WA_NOW - 25200 ))" "$(( WA_NOW - 7200 ))")" "$(pings_from_log)"
-  printf 'garbage\0\0\0\n' >> "$LOG"                        # a NUL from a crash mid-write
-  assert_eq "a NUL in the log doesn't hide its pings" 2 "$(pings_from_log | wc -l | tr -d ' ')"
-  record_ping "$WA_NOW"
-  assert_eq "first record_ping imports the logged pings" \
-            "$(printf '%s\n%s\n%s' "$(( WA_NOW - 25200 ))" "$(( WA_NOW - 7200 ))" "$WA_NOW")" "$(cat "$FIRE_HISTORY")"
-  # Once a history exists the log is never merged: its local stamps read back
-  # hours off in another TZ (or the fall-back hour), as phantom pings. History
-  # without the 25200s-ago ping: the 14400s-ago reply anchors the window.
-  printf '%s\n' "$(( WA_NOW - 7200 ))" > "$FIRE_HISTORY"
-  assert_eq "history present -> log ignored"        "$(( WA_NOW - 14400 ))" "$(INTERVAL=300; window_anchor)"
-  assert_eq "  ...even read from a shell in another TZ" "$(( WA_NOW - 14400 ))" "$(export TZ=Asia/Tokyo; INTERVAL=300; window_anchor)"
-  record_ping "$WA_NOW"
-  assert_eq "  ...and record_ping does not re-import it" "$(printf '%s\n%s' "$(( WA_NOW - 7200 ))" "$WA_NOW")" "$(cat "$FIRE_HISTORY")"
-else
-  _pass "log backfill (skipped: DST-ambiguous local hour)"
-fi
+# The log is never parsed for pings (its local stamps read back hours off in
+# another TZ): with a 25200s-ago ping logged but not in fire_history, the
+# 14400s-ago reply still anchors the window.
+{ printf '%s  ok  anchor on-time        window~x\n' "$(date -r "$(( WA_NOW - 25200 ))" '+%Y-%m-%d %H:%M:%S')"; } > "$LOG"
+printf '%s\n' "$(( WA_NOW - 7200 ))" > "$FIRE_HISTORY"
+assert_eq "logged pings are not read back"         "$(( WA_NOW - 14400 ))" "$(INTERVAL=300; window_anchor)"
+rm -f "$FIRE_HISTORY"
+assert_eq "  ...nor without a fire_history"        "$(( WA_NOW - 14400 ))" "$(INTERVAL=300; window_anchor)"
+printf '%s\n%s\n' "$(( WA_NOW - 90000 ))" "$(( WA_NOW - 7200 ))" > "$FIRE_HISTORY"
+record_ping "$WA_NOW"
+assert_eq "record_ping appends and drops pings over a day old" \
+          "$(printf '%s\n%s' "$(( WA_NOW - 7200 ))" "$WA_NOW")" "$(cat "$FIRE_HISTORY")"
+# a NUL from a crash mid-write must not make grep treat a session log as binary
+{ printf 'garbage\0\0\0\n'; _reply 180; } > "$CLAUDE_PROJECTS/session.jsonl"; rm -f "$FIRE_HISTORY" "$LAST_FIRE"
+assert_eq "NUL-damaged session log still read"     "$(( WA_NOW - 180 ))" "$(INTERVAL=300; window_anchor)"
 : > "$LOG"
 rm -f "$LAST_FIRE" "$FIRE_HISTORY" "$CLAUDE_PROJECTS"/*.jsonl
+
+# The tick reuses an open window's anchor until that window ends.
+section "time_state: window_anchor_cached"
+rm -f "$WINDOW_CACHE"; WA_NOW=$(date +%s)
+_reply 180 > "$CLAUDE_PROJECTS/session.jsonl"
+assert_eq "open window -> anchor, cached"         "$(( WA_NOW - 180 ))" "$(INTERVAL=300; window_anchor_cached)"
+rm -f "$CLAUDE_PROJECTS"/*.jsonl
+assert_eq "  ...reused while it lasts (no rescan)" "$(( WA_NOW - 180 ))" "$(INTERVAL=300; window_anchor_cached)"
+assert_eq "  ...not reused under another INTERVAL" 0 "$(INTERVAL=60; window_anchor_cached)"
+printf '%s 18000\n' "$(( WA_NOW - 18060 ))" > "$WINDOW_CACHE"
+assert_eq "  ...expired cache -> rescan"           0 "$(INTERVAL=300; window_anchor_cached)"
+rm -f "$WINDOW_CACHE"
 
 # ---- fire: do_fire outcomes -------------------------------------------------
 section "fire: do_fire success"
@@ -661,7 +681,9 @@ assert_ok       "stamps this tick"                _is_pos_int "$(cat "$LAST_TICK
 printf '%s' 1234 > "$LAST_TICK"; note_tick
 assert_eq       "reads the previous tick"         1234 "$PREV_TICK"
 printf '%s' 1234 > "$LAST_TICK"; chmod 444 "$LAST_TICK"
-assert_eq       "unwritable last_tick: the tick carries on" "ok 1234" "$( set -e; note_tick; echo "ok $PREV_TICK" )"
+# the tick carries on, and a frozen stamp is not trusted (it would make every
+# late fire "Mac was asleep")
+assert_eq       "unwritable last_tick: carries on, previous tick unknown" "ok 0" "$( set -e; note_tick; echo "ok $PREV_TICK" )"
 chmod 644 "$LAST_TICK"
 PREV_TICK=0
 
@@ -759,7 +781,45 @@ assert_eq       "Claude retry = tick start + 15m" $(( TN + 900 )) "$(read_fail_u
 _reset_codex
 ( export STUB_CODEX_RC=7; TICK_NOW=$TN; CODEX="true"; CODEX_PROMPT="ping"; MODE="standard"; INTERVAL=300; TIME="00:00"; END="23:59"; NOTIFY="false"; do_codex_fire tick )
 assert_eq       "Codex retry = tick start + 15m"  $(( TN + 900 )) "$(read_fail_until "$CODEX_FAIL_BACKOFF")"
+# likewise Codex's cadence and a limit pause with no parsed reset time
+_reset_codex
+( export STUB_CODEX_RC=0; TICK_NOW=$TN; CODEX="true"; CODEX_PROMPT="ping"; MODE="standard"; INTERVAL=300; TIME="00:00"; END="23:59"; NOTIFY="false"; do_codex_fire tick )
+assert_eq       "Codex last_fire = tick start"    "$TN" "$(read_codex_lf)"
+_reset_fire
+( export STUB_CLAUDE_RC=1 STUB_CLAUDE_OUT="You've hit your individual spend limit"; TICK_NOW=$TN
+  MODE="standard"; INTERVAL=300; TIME="00:00"; END="23:59"; NOTIFY="false"; do_fire tick )
+assert_eq       "undated limit resumes from tick start + INTERVAL" $(( TN + 18000 )) "$(read_limit_until)"
 _reset_fire; _reset_codex
+
+# A back-off file that can't be written: log the failure, but no alert — the
+# stuck file would otherwise re-alert every tick.
+section "fire: unwritable back-off file"
+_reset_fire; rm -f "$RT_CALLS/osascript"
+printf '1|%s|%s\n' "$(( $(date +%s) - 86400 ))" "$(( $(date +%s) - 87000 ))" > "$FAIL_BACKOFF"; chmod 444 "$FAIL_BACKOFF"
+( export STUB_CLAUDE_RC=7; MODE="standard"; INTERVAL=300; TIME="00:00"; END="23:59"; NOTIFY="true"; do_fire tick )
+assert_contains "logs the failure"                "$(_logtail)" "FAILED  rc=7  retry ?? (state not writable)"
+assert_fail     "no alert"                        test -s "$RT_CALLS/osascript"
+chmod 644 "$FAIL_BACKOFF"; _reset_fire
+
+# A 5h boundary due within the next minute is waited for (to 10s past due), not
+# left to the next tick: last_fire is stamped a second or more into its tick.
+section "fire: wait_for_boundary"
+if [ "$(now_min)" -ge 302 ]; then
+  _wfb() { ( export STUB_SLEEP=1; MODE="${2:-standard}"; INTERVAL=300; printf '%s' "$1" > "$LAST_FIRE"; wait_for_boundary ); }
+  rm -f "$RT_CALLS/sleep"
+  _wfb $(( $(date +%s) - 18000 + 30 ))
+  WFB_S="$(cat "$RT_CALLS/sleep" 2>/dev/null)"
+  assert_ok       "due in 30s -> waits to 10s past due" test "${WFB_S:-0}" -ge 38 -a "${WFB_S:-0}" -le 40
+  rm -f "$RT_CALLS/sleep"; _wfb $(( $(date +%s) - 18000 + 120 ))
+  assert_fail     "due in 2m -> next tick's job"  test -s "$RT_CALLS/sleep"
+  _wfb $(( $(date +%s) - 18000 - 60 ))
+  assert_fail     "already past due+10 -> no wait" test -s "$RT_CALLS/sleep"
+  _wfb $(( $(date +%s) - 18000 + 30 )) daily
+  assert_fail     "daily mode -> no wait"         test -s "$RT_CALLS/sleep"
+  rm -f "$LAST_FIRE"
+else
+  _pass "wait_for_boundary (skipped: before 05:02)"
+fi
 
 section "fire: cmd_tick honors the failure back-off"
 _reset_fire
