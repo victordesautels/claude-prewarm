@@ -260,8 +260,9 @@ parse_reset_epoch() {   # $1 = message
     fi
   fi
   # A reset that has only just passed (the message rounds down, or the limit
-  # lingers a moment past it) is not a day — or a year — away: look again in 15m.
-  [ "$base" -gt "$now" ] || base=$(( now + 900 ))
+  # lingers a moment past it) is not a day — or a year — away: look again in 15m,
+  # counted from the tick's start so the tick 15m on is not a hair early.
+  [ "$base" -gt "$now" ] || base=$(( ${TICK_NOW:-$now} + 900 ))
   echo "$base"
 }
 # Detect a usage-limit response. On match: echo the reset epoch (0 if unknown) and

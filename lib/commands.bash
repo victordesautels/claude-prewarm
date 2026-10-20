@@ -235,6 +235,8 @@ cmd_status() {
   # one-glance health line, derived from your real window (your work OR our pings)
   if [ "$loaded" != "yes" ]; then
     printf '  %s %s\n' "$(yellow "$S_WARN not installed")" "$(dim "— run: claude-prewarm install")"
+  elif [ "${CONFIG_BROKEN:-0}" = 1 ] || ! ( validate_config ) >/dev/null 2>&1; then
+    printf '  %s %s\n' "$(yellow "$S_WARN config error")" "$(dim "prewarms paused — fix: claude-prewarm config edit")"
   elif [ "$lu" -gt "$nowE" ]; then
     printf '  %s %s\n' "$(yellow "$S_WARN limited")" "$(dim "usage limit — prewarms paused until $(date -r "$lu" '+%H:%M')")"
   elif [ "$fu" -gt "$nowE" ]; then
@@ -296,13 +298,11 @@ cmd_config() {
   case "${1:-get}" in
     get|show|"") echo "# $CONFIG"; [ -f "$CONFIG" ] && cat "$CONFIG" || echo "(defaults; not yet saved)";;
     path)        echo "$CONFIG";;
-    edit)        local o_t="$TIME" o_w="$WAKE" o_d="$DAYS"
-                 cp "$CONFIG" "$CONFIG.bak" 2>/dev/null || true
+    edit)        cp "$CONFIG" "$CONFIG.bak" 2>/dev/null || true
                  "${EDITOR:-vi}" "$CONFIG"
                  # parse-check and trial-load first: sourcing a syntax error (or a
                  # line that runs as a command) would exit before the revert
-                 # shellcheck disable=SC1090
-                 if [ -f "$CONFIG" ] && ! { "$BASH" -n "$CONFIG" && ( source "$CONFIG" ); } >/dev/null 2>&1; then
+                 if [ -f "$CONFIG" ] && ! { "$BASH" -n "$CONFIG" 2>/dev/null && config_loads "$CONFIG"; }; then
                    echo "the edited config does not load — reverting to previous config."
                    [ -f "$CONFIG.bak" ] && mv "$CONFIG.bak" "$CONFIG"
                    exit 2
@@ -318,7 +318,7 @@ cmd_config() {
                  rm -f "$CONFIG.bak"; save_config    # normalize to %q form
                  if [ -f "$PLIST" ]; then
                    apply_agents; echo "(re-applied agents)"
-                   if [ "$TIME" != "$o_t" ] || [ "$WAKE" != "$o_w" ] || [ "$DAYS" != "$o_d" ]; then reconcile_wake; fi
+                   wake_in_sync || reconcile_wake
                  fi;;
     set)         local k="${2:-}" v="${3:-}"
                  [ -n "$k" ] || die "usage: claude-prewarm config set KEY VALUE"
@@ -336,7 +336,7 @@ keys: TIME DAYS INTERVAL WORKSTART END MODE KEEPALIVE PROMPT MODEL CODEX CODEX_P
                  esac
                  validate_config; save_config; echo "set $k=$v"
                  if [ -f "$PLIST" ]; then apply_agents; echo "(re-applied schedule)"
-                   case "$k" in TIME|WAKE|DAYS) reconcile_wake;; esac; fi;;
+                   case "$k" in TIME|WAKE|DAYS|MODE) wake_in_sync || reconcile_wake;; esac; fi;;
     test-notify) NOTIFY=true notify routine "Claude prewarm" "Test notification — if you can read this, notifications work."
                  echo "sent. No banner? System Settings → Notifications → Claude Prewarm → Allow.";;
     *) die "usage: claude-prewarm config [get|set KEY VALUE|edit|path|test-notify]";;

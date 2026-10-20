@@ -84,8 +84,18 @@ apply_agents() {
 }
 
 # ---- pmset wake (the only privileged action) ---------------------------------
+wake_time() { printf '%s:00\n' "$(to_hm $(( ( $(to_min "$TIME") - 1 + 1440 ) % 1440 )))"; }   # TIME-1
+# True when the pmset wake we set (WAKE_MARK, absent if none) is the one the
+# config calls for. `config` compares this, not before/after values: after
+# editing a config that didn't load, "before" is only the defaults.
+wake_in_sync() {
+  local want=""
+  if [ "$MODE" != "manual" ] && [ "$WAKE" = "true" ]; then want="$(pmset_days) $(wake_time)"; fi
+  [ "$(cat "$WAKE_MARK" 2>/dev/null || true)" = "$want" ]
+}
+
 set_wake() {   # interactive sudo; records a marker so uninstall can clean up
-  local wt; wt="$(to_hm $(( ( $(to_min "$TIME") - 1 + 1440 ) % 1440 )))"":00"
+  local wt; wt="$(wake_time)"
   printf '%s\n' "$(dim "  scheduling overnight wake at $wt ($(pmset_days)) — admin needed…")"
   if sudo pmset repeat wakeorpoweron "$(pmset_days)" "$wt"; then
     printf '%s %s\n' "$(pmset_days)" "$wt" > "$WAKE_MARK"

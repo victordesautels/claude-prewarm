@@ -4,6 +4,41 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.11-beta] — 2026-10-20
+
+### Fixed
+- A manual `now` inside an open window is no longer added to the ping
+  history. It opened nothing, and since 0.5.10 it was stamped at completion: a
+  `now` finishing just past the window's end replayed as a new window and held
+  back the next scheduled ping for up to 5 hours.
+- A boundary due any time before the next tick is now waited for (was up to
+  150s). Each completion-stamped ping starts a little later into its tick than
+  the last, so the afternoon boundary still slipped a whole tick.
+- The config trial load runs in a separate `bash -eu`. errexit is off inside an
+  `if` test, subshells included, so a failing line followed by a good one
+  passed the trial, and then every command died on the real load.
+- `config edit` and `config set` re-set the `pmset` wake when the one set
+  differs from what the config needs. They used to compare old and new
+  values, and after editing a config that didn't load the "old" values were
+  the defaults: the wake could stay a minute before the old `TIME`, making
+  every morning anchor late. `config set MODE manual` now clears the wake too.
+- A usage limit still there after its pause, whose message again quotes a reset
+  that has just passed (a spend limit quoting the session reset it doesn't
+  lift), now backs off a full window rather than pinging every 15 minutes. It
+  alerts only when a limit is new.
+- `status` shows "config error — prewarms paused" when the config doesn't load
+  or has an invalid value.
+
+### Known limitations (accepted)
+- Window detection replays one day of activity; a window chain running over
+  24h without a 5-hour gap can be misplaced.
+- `TIME` from 00:00 to 00:04 gets no pre-`TIME` wait (the wake lands the day
+  before).
+- A ping that times out is treated as failed even if it reached the API.
+- A `"uuid","timestamp"` pair nested in tool-call arguments ahead of a record's
+  own could be misread (none in two weeks of real logs).
+- Upgrading straight from 0.5.2 loses that day's earlier pings.
+
 ## [0.5.10-beta] — 2026-10-20
 
 ### Fixed

@@ -255,7 +255,9 @@ else
   _pass "just-past resets (skipped: around midnight)"
 fi
 if [ "$(now_min)" -ge 121 ]; then
-  assert_eq "undated, 2h past -> tomorrow's"     "$(date -v+1d -v-2H '+%Y-%m-%d %H:%M')" \
+  # expected from the same wall-clock token, so a DST change in between can't skew it
+  HM2="$(date -v-2H '+%H:%M')"
+  assert_eq "undated, 2h past -> tomorrow's"     "$(date -v+1d '+%Y-%m-%d') $HM2" \
             "$(date -r "$(parse_reset_epoch "resets $(LC_ALL=C date -v-2H '+%-I:%M%p')")" '+%Y-%m-%d %H:%M')"
 else
   _pass "undated 2h past (skipped: before 02:01)"
@@ -343,7 +345,8 @@ _mkstub() {  # $1=name  $2=body (single-quoted; $RT_* expand at stub runtime, no
 }
 # claude: $STUB_CLAUDE_HANG turns it into a silent sleep that long — a hung ping
 # (exec, so the watchdog's TERM leaves no orphaned child).
-_mkstub claude     'echo "$@" >> "$RT_CALLS/claude"; [ -n "${STUB_CLAUDE_HANG:-}" ] && exec /bin/sleep "$STUB_CLAUDE_HANG"; printf "%s" "${STUB_CLAUDE_OUT:-pong}"; exit "${STUB_CLAUDE_RC:-0}"'
+# $STUB_CLAUDE_DELAY: answer normally, that many seconds late (a slow startup).
+_mkstub claude     'echo "$@" >> "$RT_CALLS/claude"; [ -n "${STUB_CLAUDE_HANG:-}" ] && exec /bin/sleep "$STUB_CLAUDE_HANG"; [ -n "${STUB_CLAUDE_DELAY:-}" ] && /bin/sleep "$STUB_CLAUDE_DELAY"; printf "%s" "${STUB_CLAUDE_OUT:-pong}"; exit "${STUB_CLAUDE_RC:-0}"'
 _mkstub codex      'echo "$@" >> "$RT_CALLS/codex";  printf "%s" "${STUB_CODEX_OUT:-pong}";  exit "${STUB_CODEX_RC:-0}"'
 _mkstub caffeinate 'echo "$@" >> "$RT_CALLS/caffeinate"; exit 0'
 # sleep: real unless $STUB_SLEEP is set (then it only records), so wait_for_time
@@ -463,6 +466,19 @@ rm -f "$RT_CALLS/osascript"; _notify true    routine
 assert_ok   "NOTIFY=true notifies"               test -s "$RT_CALLS/osascript"
 
 # ---- launchd: pmset wake (sudo stubbed) ------------------------------------
+# `config` re-sets the wake when the one set differs from what the config needs
+# (comparing before/after values missed it after editing a config that didn't load)
+section "launchd: wake_in_sync"
+_wis() { ( MODE="${1}"; WAKE="${2}"; TIME="${3}"; DAYS="weekdays"; wake_in_sync ); }
+printf 'MTWRF 05:59:00\n' > "$WAKE_MARK"
+assert_ok   "set wake matches TIME 06:00"         _wis standard true 06:00
+assert_fail "TIME moved to 05:00 -> out of sync"  _wis standard true 05:00
+assert_fail "WAKE off but a wake set -> out"      _wis standard false 06:00
+assert_fail "manual mode but a wake set -> out"   _wis manual true 06:00
+rm -f "$WAKE_MARK"
+assert_ok   "WAKE off, none set -> in sync"       _wis standard false 06:00
+assert_fail "WAKE on, none set -> out"            _wis standard true 06:00
+
 section "launchd: reconcile_wake"
 rm -f "$WAKE_MARK" "$RT_CALLS/pmset"
 ( MODE="standard"; WAKE="true"; TIME="05:00"; DAYS="weekdays"; reconcile_wake ) >/dev/null 2>&1
@@ -588,6 +604,12 @@ assert_contains "invokes claude with -p"          "$(cat "$RT_CALLS/claude" 2>/d
 assert_contains "ping skips session persistence"  "$(cat "$RT_CALLS/claude" 2>/dev/null)" "--no-session-persistence"
 assert_eq       "records the ping in fire_history" "$(read_lf)" "$(tail -n1 "$FIRE_HISTORY" 2>/dev/null)"
 assert_ok       "holds the Mac awake for the ping" _wait_for_call caffeinate "-w"
+# stamped when the ping finished (the window opened when the request arrived,
+# after claude's startup), so the next boundary can't land inside this window
+_reset_fire; CS_T0=$(date +%s)
+( export STUB_CLAUDE_DELAY=2
+  MODE="standard"; INTERVAL=300; TIME="00:00"; END="23:59"; NOTIFY="false"; CODEX="false"; do_fire tick )
+assert_ok       "last_fire stamped at completion" test "$(read_lf)" -ge $(( CS_T0 + 2 ))
 
 # A boundary fire that's overdue (Mac was asleep) must log DELAYED and record
 # recovery. Seed last-fire 1h ago; with INTERVAL=5 the boundary was due ~55m ago.
@@ -619,6 +641,25 @@ _reset_fire
 assert_ok       "writes a positive limit_until"   _is_pos_int "$(read_limit_until)"
 assert_contains "logs a LIMIT line"               "$(_logtail)" "LIMIT"
 assert_eq       "does NOT advance last_fire"      0 "$(read_lf)"
+
+# A limit still there after its pause, quoting a reset that has just passed
+# again: one full window's back-off and no new alert, not a ping and an alert
+# every 15 minutes. A first limit alerts.
+section "fire: renewed limit backs off without re-alerting"
+if [ "$(now_min)" -ge 11 ] && [ "$(now_min)" -lt 1430 ]; then
+  _reset_fire; rm -f "$RT_CALLS/osascript"
+  RL_MSG="You've hit your org's monthly spend limit · your weekly limit resets $(LC_ALL=C date -v-10M '+%-I:%M%p')"
+  ( export STUB_CLAUDE_RC=1 STUB_CLAUDE_OUT="$RL_MSG"; MODE="standard"; INTERVAL=300; TIME="00:00"; END="23:59"; NOTIFY="true"; do_fire tick )
+  assert_ok       "first limit: retry in ~15m"    test $(( $(read_limit_until) - $(date +%s) )) -le 905
+  assert_ok       "first limit alerts"            test -s "$RT_CALLS/osascript"
+  rm -f "$RT_CALLS/osascript"; RL_T=$(date +%s)
+  ( export STUB_CLAUDE_RC=1 STUB_CLAUDE_OUT="$RL_MSG"; TICK_NOW=$RL_T; MODE="standard"; INTERVAL=300; TIME="00:00"; END="23:59"; NOTIFY="true"; do_fire tick )
+  assert_eq       "renewed: a full window's back-off" $(( RL_T + 18000 )) "$(read_limit_until)"
+  assert_fail     "renewed: no new alert"         test -s "$RT_CALLS/osascript"
+  _reset_fire
+else
+  _pass "renewed limit (skipped: around midnight)"
+fi
 
 section "fire: do_fire spend limit (rc=1) backs off"
 _reset_fire
@@ -746,6 +787,9 @@ RT_NOW="$(date +%s)"; printf '%s' "$RT_NOW" > "$LAST_FIRE"   # our own ping => w
   MODE="standard"; INTERVAL=300; TIME="00:00"; END="23:59"; NOTIFY="false"; do_fire manual )
 assert_contains "logs 'already open'"             "$(_logtail)" "already open"
 assert_eq       "manual fire does not re-anchor"  "$RT_NOW" "$(read_lf)"
+# it opened nothing, so it stays out of the history: its completion time could
+# fall past the window's end and replay as a phantom window
+assert_fail     "  ...nor enter the ping history" test -s "$FIRE_HISTORY"
 
 # ---- fire: do_codex_fire (opt-in Codex ping) -------------------------------
 section "fire: do_codex_fire success"
@@ -848,11 +892,14 @@ if [ "$(date -r $(( $(date +%s) - 18060 )) +%F)" = "$(date +%F)" ]; then
   _wfb $(( $(date +%s) - 18000 + 30 ))
   WFB_S="$(cat "$RT_CALLS/sleep" 2>/dev/null)"
   assert_ok       "due in 30s -> waits to 10s past due" test "${WFB_S:-0}" -ge 38 -a "${WFB_S:-0}" -le 40
-  rm -f "$RT_CALLS/sleep"; _wfb $(( $(date +%s) - 18000 + 180 ))
-  assert_fail     "due in 3m -> next tick's job"  test -s "$RT_CALLS/sleep"
-  _wfb $(( $(date +%s) - 18000 - 60 ))
+  rm -f "$RT_CALLS/sleep"; _wfb $(( $(date +%s) - 18000 + 240 ))
+  WFB_S="$(cat "$RT_CALLS/sleep" 2>/dev/null)"
+  assert_ok       "due in 4m (before the next tick) -> waits" test "${WFB_S:-0}" -ge 248 -a "${WFB_S:-0}" -le 250
+  rm -f "$RT_CALLS/sleep"; _wfb $(( $(date +%s) - 18000 + 360 ))
+  assert_fail     "due in 6m -> next tick's job"  test -s "$RT_CALLS/sleep"
+  rm -f "$RT_CALLS/sleep"; _wfb $(( $(date +%s) - 18000 - 60 ))
   assert_fail     "already past due+10 -> no wait" test -s "$RT_CALLS/sleep"
-  _wfb $(( $(date +%s) - 18000 + 30 )) daily
+  rm -f "$RT_CALLS/sleep"; _wfb $(( $(date +%s) - 18000 + 30 )) daily
   assert_fail     "daily mode -> no wait"         test -s "$RT_CALLS/sleep"
   # after the wait the guardrail is checked again (the wait can cross the cutoff)
   : > "$LOG"; rm -f "$LAST_SKIP"
@@ -861,6 +908,13 @@ if [ "$(date -r $(( $(date +%s) - 18060 )) +%F)" = "$(date +%F)" ]; then
     printf '%s' "$(( $(date +%s) - 18000 + 30 ))" > "$LAST_FIRE"; wait_for_boundary; echo fired >> "$LOG" )
   assert_contains "guardrail rechecked after the wait" "$(cat "$LOG")" "SKIP    all: guardrail"
   assert_fail     "  ...and the tick ends there"  grep -q fired "$LOG"
+  # the real thing, with a real 3s sleep: a tick finds the boundary 3s short of
+  # due (+10s margin), waits it out and fires in the same tick
+  _reset_fire
+  printf '%s' "$(( $(date +%s) - 18000 - 10 + 3 ))" > "$LAST_FIRE"
+  ( _tick_due )
+  assert_ok       "boundary waited for, then fired" test -s "$RT_CALLS/claude"
+  assert_contains "  ...as an on-time boundary"   "$(_logtail)" "ok  boundary on-time"
   rm -f "$LAST_FIRE"
 else
   _pass "wait_for_boundary (skipped: before 05:02)"

@@ -408,9 +408,15 @@ run_cli config set NOTIFY false >/dev/null && fail "e2e: config set refuses a br
   || { grep -q 'END=17:00 (oops' "$CFG" && ok "e2e: config set refuses a broken config" || fail "e2e: config set refuses a broken config" "$(cat "$CFG")"; }
 run_cli install-default --notify delayed >/dev/null && fail "e2e: install refuses a broken config" \
   || { grep -q 'END=17:00 (oops' "$CFG" && ok "e2e: install refuses a broken config" || fail "e2e: install refuses a broken config" "$(cat "$CFG")"; }
-# parses, but a line runs as a command: still "does not load"
-rm -f "$ST/last_skip"; printf 'TIME=00:00\nEND=23:59\nPROMPT=good morning\n' > "$CFG"
+printf '#!/bin/bash\nprintf "%%b" "$EDIT_TO" > "$1"\n' > "$SB/bin/fake-editor"; chmod +x "$SB/bin/fake-editor"
+# parses, but a line runs as a command — not the last line, so a trial with
+# errexit silently off (inside an `if`) would pass it: still "does not load"
+rm -f "$ST/last_skip"; printf 'TIME=00:00\nEND=23:59\nPROMPT=good morning\nMODEL=\n' > "$CFG"
 expect "unquoted value (runs a command) -> pauses" "SKIP    all: config does not load" claude 0
+conf 00:00 23:59 0 false
+EDIT_TO='TIME=00:00\nEND=23:59\nPROMPT=good morning\nMODEL=\n' EDITOR="$SB/bin/fake-editor" run_cli config edit >/dev/null; erc=$?
+grep -q 'PROMPT=good morning' "$CFG" && fail "e2e: config edit reverts a command-running edit" "rc=$erc $(cat "$CFG")" \
+  || ok "e2e: config edit reverts a command-running edit"
 # loads, but a value is invalid: pauses with the reason, alerts once a day
 rm -f "$ST/last_skip" "$SB/applet.log"; conf 00:00 23:59 0 false; printf 'END=25:00\n' >> "$CFG"
 expect "invalid value -> pauses with the reason"   "SKIP    all: invalid config: END must be HH:MM" claude 0

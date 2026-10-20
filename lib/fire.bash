@@ -98,12 +98,13 @@ late_note() {  # $1 = late_kind (held|unknown): the log's reason for a late, ale
   if [ "$1" = "held" ]; then echo "window open or skipped"; else echo "first tick, cause unknown"; fi
 }
 
-# A boundary that comes due within the next couple of minutes is waited for, not
-# left to the next tick. last_fire is stamped when its ping finished — after
-# window_anchor and claude's own run, seconds to a minute into its tick — so on
-# launchd's steady 300s phase the tick 5h on checks too early, and boundaries
-# fired 5 minutes late (e.g. 06:24:19 -> 11:29:19). Stamping at completion keeps
-# the next ping clear of the old window (which opened when that request arrived,
+# A boundary that comes due before the next tick would run is waited for, not
+# left to that tick. last_fire is stamped when its ping finished — after
+# window_anchor and claude's own run, seconds to a minute or more into its tick —
+# so on launchd's steady 300s phase the tick 5h on checks early, each boundary
+# starting a little later into its tick than the last; boundaries fired 5
+# minutes late (e.g. 06:24:19 -> 11:29:19). Stamping at completion keeps the
+# next ping clear of the old window (which opened when that request arrived,
 # before it completed); the wait ends 10s past due for good measure.
 wait_for_boundary() {
   [ "$MODE" = "standard" ] || return 0
@@ -111,7 +112,7 @@ wait_for_boundary() {
   lf=$(read_lf)
   { [ "$lf" -gt 0 ] && [ "$(date -r "$lf" '+%Y%m%d')" = "$(date '+%Y%m%d')" ]; } || return 0
   s=$(( lf + $(mode_interval_min) * 60 + 10 - $(date +%s) ))
-  { [ "$s" -gt 0 ] && [ "$s" -le 150 ]; } || return 0
+  { [ "$s" -gt 0 ] && [ "$s" -le "$TICK_SECONDS" ]; } || return 0
   hold_awake
   sleep "$s"
   # the wait may have crossed END or the MIN_REMAINING_MIN cutoff: a skip now
@@ -217,16 +218,24 @@ do_fire() {  # $1 = tick | manual
   # Usage limit hit? Back off — pinging a maxed-out account just wastes fires and
   # spams notifications. Record when to resume so ticks stay quiet until then.
   if reset_epoch="$(detect_limit "$out")"; then
-    local resume until_txt fmt='+%H:%M'
+    local resume until_txt fmt='+%H:%M' prev_lu
+    prev_lu=$(read_limit_until)                         # >0: we were already paused for a limit
     if [ "$reset_epoch" -gt 0 ]; then resume="$reset_epoch"
     else resume=$(( ${TICK_NOW:-$nowE} + INTERVAL * 60 )); fi   # from the tick's phase, so the tick then resumes
+    # Still limited after a pause, and the message again names a reset that has
+    # just passed (a spend limit quoting the session reset it doesn't lift):
+    # back off a full window instead of pinging every 15 minutes.
+    if [ "$prev_lu" -gt 0 ] && [ $(( resume - ${TICK_NOW:-$nowE} )) -le 900 ]; then
+      resume=$(( ${TICK_NOW:-$nowE} + INTERVAL * 60 )); reset_epoch=0
+    fi
     # spell out the day when the reset is not today, so "until 15:00" can't read as "soon"
     [ "$(date -r "$resume" '+%Y%m%d')" != "$(date '+%Y%m%d')" ] && fmt='+%b %-d %H:%M'
     until_txt="$(date -r "$resume" "$fmt")"
     [ "$reset_epoch" -gt 0 ] || until_txt="~$until_txt"
     echo "$resume" > "$LIMIT_UNTIL"; rm -f "$FAIL_BACKOFF"   # the limit pause supersedes a failure back-off
     printf '%s  LIMIT   usage limit; pausing until %s  msg=%s\n' "$ts" "$until_txt" "${out:0:120}" >> "$LOG"
-    notify alert "Claude prewarm - usage limit" "Limit reached. Pausing prewarms until $until_txt."
+    # alert on a new limit only; a renewed pause is in the log
+    [ "$prev_lu" -gt 0 ] || notify alert "Claude prewarm - usage limit" "Limit reached. Pausing prewarms until $until_txt."
     return 0
   fi
 
@@ -248,8 +257,10 @@ do_fire() {  # $1 = tick | manual
   fi
 
   rm -f "$LIMIT_UNTIL" "$FAIL_BACKOFF"                  # a clean ping means we're unblocked
-  record_ping "$pinged"
-  [ "$reanchor" -eq 1 ] && echo "$pinged" > "$LAST_FIRE"
+  # Only a ping that opened a window goes into the history. A manual one inside
+  # an open window opened nothing, and its completion time could fall just past
+  # that window's end and replay as a phantom window holding back the next ping.
+  if [ "$reanchor" -eq 1 ]; then record_ping "$pinged"; echo "$pinged" > "$LAST_FIRE"; fi
 
   if [ "$mode" = "manual" ] && [ "$reanchor" -eq 0 ]; then
     local openend; openend="$(date -r "$(( anchor + INTERVAL * 60 ))" '+%H:%M')"

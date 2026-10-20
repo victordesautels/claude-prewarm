@@ -15,7 +15,7 @@ and dependency-free.
 ## Commands
 
 ```bash
-bash tests/run.sh                     # full test suite (~5s, 266 assertions)
+bash tests/run.sh                     # full test suite (~10s, 281 assertions)
 bash tests/regression.sh              # notifier, CLI routing, and an end-to-end tick under set -euo pipefail
 ./scripts/lint.sh                     # bash -n + shellcheck + dead-code check
 git config core.hooksPath .githooks   # one-time: enable the pre-commit gate

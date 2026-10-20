@@ -31,7 +31,7 @@
 #
 set -euo pipefail
 
-VERSION="0.5.10-beta"
+VERSION="0.5.11-beta"
 LABEL="com.claude-prewarm"
 AWAKE_LABEL="com.claude-prewarm.awake"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
@@ -84,15 +84,18 @@ STAYAWAKE="false"   # no-sudo caffeinate: keep Mac awake WORKSTART..END
 NOTIFY="true"       # true = all fires | delayed = only late/failed | false = none
 
 mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$HOME/Library/LaunchAgents"
+# true if $1 sources cleanly under the same strict mode as this script
+config_loads() { "$BASH" -euo pipefail -c '. "$1"' _ "$1" >/dev/null 2>&1 </dev/null; }
 # Parse-check before sourcing: a syntax error in a sourced file exits the shell
 # outright under set -e, which would take down `config edit` (the fix) and kill
 # every tick silently. A broken config is set aside and handled at dispatch.
 CONFIG_BROKEN=0
 if [ -f "$CONFIG" ]; then
-  # also a trial load in a subshell: a file that parses can still fail when run
-  # (PROMPT=good morning runs `morning`; an unset $VAR trips set -u)
-  # shellcheck disable=SC1090
-  if "$BASH" -n "$CONFIG" 2>/dev/null && ( source "$CONFIG" ) >/dev/null 2>&1; then
+  # also a trial load: a file that parses can still fail when run (PROMPT=good
+  # morning runs `morning`; an unset $VAR trips set -u). In a separate bash, not
+  # a subshell: errexit is off inside an `if` test, subshells included, so a
+  # failing line followed by a good one would pass the trial.
+  if "$BASH" -n "$CONFIG" 2>/dev/null && config_loads "$CONFIG"; then
     # shellcheck disable=SC1090
     source "$CONFIG"
   else
